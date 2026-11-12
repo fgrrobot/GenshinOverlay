@@ -1,0 +1,19 @@
+# Сборка и артефакты .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+*.trx
+
+# Генерируемые данные приложения
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/demo_atlas.png
+
+# Прочее
+*.log
+Thumbs.db
+.DS_Store
