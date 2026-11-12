@@ -1,6 +1,7 @@
 # Сборка и артефакты .NET
 bin/
 obj/
+docs/
 *.user
 *.suo
 .vs/
