@@ -32,6 +32,7 @@ public sealed class AppSession : IDisposable
     private long? _selectedMarkerId;
     private double? _truthErrorM;
     private double _frameMs;
+    private double _headingSmooth;
     private bool _running;
     private bool _paused;
     private bool _hasStarted;
@@ -86,12 +87,14 @@ public sealed class AppSession : IDisposable
         {
             _demo.Reset();
             _tracker.Snap(_demo.TruthX, _demo.TruthZ, _demo.TruthHeadingDeg);
+            _headingSmooth = _demo.TruthHeadingDeg;
             _status = TrackingStatus.Tracking;
             _message = "Демо-мир запущен";
         }
         else
         {
             _tracker.Reset();
+            _headingSmooth = 0;
             _status = TrackingStatus.Lost;
             _message = "Выберите точку привязки — телепорт в игре";
         }
@@ -232,10 +235,12 @@ public sealed class AppSession : IDisposable
         {
             _demo.TeleportTo(marker.X, marker.Z);
             _tracker.Snap(marker.X, marker.Z, _demo.TruthHeadingDeg);
+            _headingSmooth = _demo.TruthHeadingDeg;
         }
         else
         {
             _tracker.Snap(marker.X, marker.Z);
+            _headingSmooth = _tracker.HeadingDeg;
         }
 
         _status = TrackingStatus.Tracking;
@@ -325,16 +330,25 @@ public sealed class AppSession : IDisposable
             return;
         }
 
+        // Сглаживаем курс, чтобы карта не дёргалась на поворотах маршрута.
+        _headingSmooth = SmoothAngle(_headingSmooth, result.HeadingDeg, 0.28);
+
         _geo = new GeoState(
             result.X.Value,
             result.Z.Value,
             _settings.Mode == SessionMode.Demo ? 0.0 : null,
-            result.HeadingDeg,
+            _headingSmooth,
             result.Confidence,
             "odometry",
             0,
             null,
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
+    }
+
+    private static double SmoothAngle(double current, double target, double factor)
+    {
+        var delta = GeoMath.AngleDelta(target, current);
+        return GeoMath.NormalizeAngle(current + delta * factor);
     }
 
     private void RefreshMarkers()

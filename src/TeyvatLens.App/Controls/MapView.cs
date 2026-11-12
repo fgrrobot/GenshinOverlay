@@ -8,37 +8,26 @@ using TeyvatLens.Core.Models;
 namespace TeyvatLens.App.Controls;
 
 /// <summary>
-/// Карта мира: север сверху, игрок в центре. Рисует атлас (если он есть),
-/// кольца радиуса, маркеры, подсказку и стрелку игрока.
+/// Карта мира в духе Genshin Impact: вращается вместе с игроком так, что
+/// направление взгляда всегда смотрит вверх. Игрок — в центре, север
+/// обозначен буквой «С», которая смещается по краю карты.
 /// </summary>
 public sealed class MapView : FrameworkElement
 {
     private static readonly Brush BackgroundBrush = FrozenBrush(Color.FromRgb(13, 16, 22));
-    private static readonly Brush GridBrush = FrozenBrush(Color.FromArgb(24, 111, 211, 232));
+    private static readonly Brush GridBrush = FrozenBrush(Color.FromArgb(38, 46, 122, 136));
     private static readonly Pen GridPen = FrozenPen(GridBrush, 1);
-    private static readonly Pen RingPen = FrozenPen(FrozenBrush(Color.FromArgb(70, 140, 160, 180)), 1);
-    private static readonly Pen OuterRingPen = FrozenPen(FrozenBrush(Color.FromArgb(110, 111, 211, 232)), 1.5);
+    private static readonly Pen RingPen = FrozenPen(FrozenBrush(Color.FromArgb(80, 46, 122, 136)), 1);
+    private static readonly Pen OuterRingPen = FrozenPen(FrozenBrush(Color.FromArgb(150, 31, 102, 117)), 1.5);
     private static readonly Pen BorderPen = FrozenPen(FrozenBrush(Color.FromArgb(90, 42, 51, 66)), 1);
-    private static readonly Pen SelectedPen = FrozenPen(FrozenBrush(Color.FromRgb(111, 211, 232)), 2);
-    private static readonly Brush PlayerBrush = FrozenBrush(Color.FromRgb(231, 237, 245));
-    private static readonly Pen PlayerPen = FrozenPen(FrozenBrush(Color.FromArgb(160, 7, 19, 26)), 1.5);
+    private static readonly Pen SelectedPen = FrozenPen(FrozenBrush(Color.FromRgb(31, 102, 117)), 2.2);
+    private static readonly Brush PlayerBrush = FrozenBrush(Color.FromRgb(250, 253, 255));
+    private static readonly Pen PlayerPen = FrozenPen(FrozenBrush(Color.FromArgb(220, 27, 36, 48)), 1.5);
     private static readonly Brush GlowBrush = CreateGlow();
-    private static readonly Brush ShadowBrush = FrozenBrush(Color.FromArgb(45, 0, 0, 0));
-    private static readonly Brush MutedBrush = FrozenBrush(Color.FromRgb(139, 150, 168));
-    private static readonly Brush AccentBrush = FrozenBrush(Color.FromRgb(111, 211, 232));
-    private static readonly Brush GlyphBrush = FrozenBrush(Color.FromRgb(7, 19, 26));
-    private static readonly Brush HintPenBrush = FrozenBrush(Color.FromArgb(160, 217, 180, 92));
+    private static readonly Brush MarkerShadowBrush = FrozenBrush(Color.FromArgb(70, 20, 26, 34));
+    private static readonly Brush MutedBrush = FrozenBrush(Color.FromRgb(92, 106, 120));
+    private static readonly Brush AccentBrush = FrozenBrush(Color.FromRgb(31, 102, 117));
     private static readonly Pen HintPen = CreateHintPen();
-
-    private static readonly IReadOnlyDictionary<MarkerKind, Brush> KindBrushes =
-        MarkerKinds.All.ToDictionary(
-            pair => pair.Key,
-            pair => (Brush)FrozenBrush(ParseColor(pair.Value.ColorHex)));
-
-    private static readonly IReadOnlyDictionary<MarkerKind, Brush> KindDimBrushes =
-        MarkerKinds.All.ToDictionary(
-            pair => pair.Key,
-            pair => (Brush)FrozenBrush(WithAlpha(ParseColor(pair.Value.ColorHex), 90)));
 
     private SessionSnapshot? _snapshot;
 
@@ -84,8 +73,12 @@ public sealed class MapView : FrameworkElement
         var radius = snapshot?.RadiusM ?? 120.0;
         var halfExtent = Math.Max(24.0, radius * 1.14);
         var scale = side / (2 * halfExtent);
+        var heading = geo?.HeadingDeg ?? 0.0;
 
         dc.PushClip(new RectangleGeometry(bounds, 16, 16));
+
+        // Мир вращается вокруг игрока: направление взгляда всегда сверху.
+        dc.PushTransform(new RotateTransform(-heading, center.X, center.Y));
 
         if (Atlas is not null)
         {
@@ -108,19 +101,21 @@ public sealed class MapView : FrameworkElement
 
         if (snapshot is not null && geo is not null)
         {
-            DrawMarkers(dc, square, center, geo, snapshot, scale);
+            DrawMarkers(dc, square, center, geo, snapshot, scale, heading);
         }
+
+        dc.Pop();
 
         if (geo is not null)
         {
-            DrawPlayer(dc, center, geo.HeadingDeg);
+            DrawPlayer(dc, center);
         }
         else
         {
             DrawPlaceholder(dc, center);
         }
 
-        DrawNorth(dc, square);
+        DrawNorth(dc, center, side, heading);
 
         dc.Pop();
         dc.DrawRoundedRectangle(null, BorderPen, new Rect(0.5, 0.5, bounds.Width - 1, bounds.Height - 1), 16, 16);
@@ -147,8 +142,6 @@ public sealed class MapView : FrameworkElement
         dc.Pop();
         dc.Pop();
         dc.Pop();
-
-        dc.DrawRectangle(ShadowBrush, null, square);
     }
 
     private static void DrawGrid(
@@ -193,7 +186,8 @@ public sealed class MapView : FrameworkElement
         Point center,
         GeoState geo,
         SessionSnapshot snapshot,
-        double scale)
+        double scale,
+        double headingDeg)
     {
         foreach (var item in snapshot.Markers)
         {
@@ -208,30 +202,28 @@ public sealed class MapView : FrameworkElement
             }
 
             var isSelected = snapshot.SelectedMarkerId == marker.Id;
-            var brush = marker.Collected
-                ? KindDimBrushes[marker.Kind]
-                : KindBrushes[marker.Kind];
+            var baseSize = marker.Kind == MarkerKind.Waypoint ? 20.0 : 16.0;
+            var size = marker.Collected ? baseSize * 0.8 : baseSize;
+
+            // Мягкая тень помогает иконке читаться на светлой карте.
+            dc.DrawEllipse(MarkerShadowBrush, null, point, size * 0.55, size * 0.55);
 
             if (isSelected)
             {
-                dc.DrawEllipse(null, SelectedPen, point, 12, 12);
+                dc.DrawEllipse(null, SelectedPen, point, size * 0.85, size * 0.85);
             }
 
-            var radius = marker.Collected ? 3.5 : 6.0;
-            dc.DrawEllipse(brush, null, point, radius, radius);
+            dc.PushOpacity(marker.Collected ? 0.45 : 1.0);
 
-            if (!marker.Collected)
-            {
-                var glyph = new FormattedText(
-                    MarkerKinds.Info(marker.Kind).Glyph,
-                    CultureInfo.InvariantCulture,
-                    FlowDirection.LeftToRight,
-                    new Typeface("Segoe UI"),
-                    8.5,
-                    GlyphBrush,
-                    1.0);
-                dc.DrawText(glyph, new Point(point.X - glyph.Width / 2, point.Y - glyph.Height / 2));
-            }
+            // Иконки остаются вертикальными, пока сама карта вращается.
+            dc.PushTransform(new RotateTransform(headingDeg, point.X, point.Y));
+            dc.PushTransform(new TranslateTransform(point.X - size / 2, point.Y - size / 2));
+            dc.PushTransform(new ScaleTransform(size / 24.0, size / 24.0));
+            dc.DrawDrawing(MarkerIcons.GetDrawing(marker.Kind));
+            dc.Pop();
+            dc.Pop();
+            dc.Pop();
+            dc.Pop();
         }
     }
 
@@ -249,13 +241,13 @@ public sealed class MapView : FrameworkElement
         dc.DrawLine(HintPen, center, target);
     }
 
-    private static void DrawPlayer(DrawingContext dc, Point center, double headingDeg)
+    private static void DrawPlayer(DrawingContext dc, Point center)
     {
         dc.DrawEllipse(GlowBrush, null, center, 26, 26);
 
-        var angle = headingDeg * Math.PI / 180.0;
-        var direction = new Vector(Math.Sin(angle), -Math.Cos(angle));
-        var side = new Vector(-direction.Y, direction.X);
+        // Карта уже повёрнута по курсу, поэтому игрок всегда смотрит вверх.
+        var direction = new Vector(0, -1);
+        var side = new Vector(1, 0);
 
         var tip = center + direction * 12;
         var backLeft = center - direction * 8 + side * 7.5;
@@ -292,13 +284,18 @@ public sealed class MapView : FrameworkElement
             FlowDirection.LeftToRight,
             new Typeface("Segoe UI"),
             12,
-            FrozenBrush(Color.FromRgb(92, 102, 118)),
+            MutedBrush,
             1.0);
         dc.DrawText(hint, new Point(center.X - hint.Width / 2, center.Y + 56));
     }
 
-    private static void DrawNorth(DrawingContext dc, Rect square)
+    private static void DrawNorth(DrawingContext dc, Point center, double side, double headingDeg)
     {
+        // Север смещается по краю карты: при курсе на восток он уходит влево.
+        var angle = -headingDeg * Math.PI / 180.0;
+        var direction = new Vector(Math.Sin(angle), -Math.Cos(angle));
+        var position = center + direction * (side / 2 - 20);
+
         var text = new FormattedText(
             "С",
             CultureInfo.CurrentUICulture,
@@ -308,8 +305,7 @@ public sealed class MapView : FrameworkElement
             AccentBrush,
             1.0);
 
-        var origin = new Point(square.X + square.Width / 2 - text.Width / 2, square.Y + 10);
-        dc.DrawText(text, origin);
+        dc.DrawText(text, new Point(position.X - text.Width / 2, position.Y - text.Height / 2));
     }
 
     private static Brush CreateGlow()
@@ -323,19 +319,13 @@ public sealed class MapView : FrameworkElement
 
     private static Pen CreateHintPen()
     {
-        var pen = new Pen(HintPenBrush, 1.5)
+        var pen = new Pen(FrozenBrush(Color.FromRgb(184, 134, 47)), 1.6)
         {
             DashStyle = new DashStyle(new double[] { 4, 4 }, 0)
         };
         pen.Freeze();
         return pen;
     }
-
-    private static Color ParseColor(string hex) =>
-        (Color)ColorConverter.ConvertFromString(hex);
-
-    private static Color WithAlpha(Color color, byte alpha) =>
-        Color.FromArgb(alpha, color.R, color.G, color.B);
 
     private static SolidColorBrush FrozenBrush(Color color)
     {

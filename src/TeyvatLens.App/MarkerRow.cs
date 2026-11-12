@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Windows.Media;
+using TeyvatLens.App.Controls;
 using TeyvatLens.Core.Geometry;
 using TeyvatLens.Core.Models;
 
@@ -17,9 +18,9 @@ public sealed class MarkerRow : INotifyPropertyChanged
         Id = item.Marker.Id;
         Name = item.Marker.Name;
         Kind = item.Marker.Kind;
-        Glyph = MarkerKinds.Info(item.Marker.Kind).Glyph;
+        Icon = MarkerIcons.GetImage(item.Marker.Kind);
         KindLabel = MarkerKinds.Info(item.Marker.Kind).NameRu;
-        Color = BrushFrom(MarkerKinds.Info(item.Marker.Kind).ColorHex);
+        Accent = BrushFrom(MarkerKinds.Info(item.Marker.Kind).ColorHex);
         Update(item, headingDeg);
     }
 
@@ -31,11 +32,11 @@ public sealed class MarkerRow : INotifyPropertyChanged
 
     public MarkerKind Kind { get; }
 
-    public string Glyph { get; }
+    public ImageSource Icon { get; }
 
     public string KindLabel { get; }
 
-    public Brush Color { get; }
+    public Brush Accent { get; }
 
     public string DistanceText
     {

@@ -243,14 +243,14 @@
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <Border Width="24" Height="24" CornerRadius="12"
-                                                    Background="{Binding Color}"
+                                            <Border Width="30" Height="30" CornerRadius="9"
+                                                    Background="#141A23"
+                                                    BorderBrush="{Binding Accent}"
+                                                    BorderThickness="1"
                                                     VerticalAlignment="Center">
-                                                <TextBlock Text="{Binding Glyph}"
-                                                           FontSize="11"
-                                                           Foreground="#07131A"
-                                                           HorizontalAlignment="Center"
-                                                           VerticalAlignment="Center"/>
+                                                <Image Source="{Binding Icon}"
+                                                       Width="21" Height="21"
+                                                       RenderOptions.BitmapScalingMode="HighQuality"/>
                                             </Border>
                                             <StackPanel Grid.Column="1" Margin="10,0,8,0" VerticalAlignment="Center">
                                                 <TextBlock Text="{Binding Name}" FontSize="12.5"/>
