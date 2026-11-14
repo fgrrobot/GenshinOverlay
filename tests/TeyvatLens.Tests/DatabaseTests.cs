@@ -1,5 +1,6 @@
 using TeyvatLens.Core.Data;
 using TeyvatLens.Core.Models;
+using TeyvatLens.Core.RealMap;
 
 namespace TeyvatLens.Tests;
 
@@ -110,6 +111,33 @@ public sealed class DatabaseTests : IDisposable
         database.ResetProgress();
 
         Assert.Equal(0, database.CountCollected());
+    }
+
+    [Fact]
+    public void ReplaceMarkers_SeparatesRealAndSynthetic()
+    {
+        using var database = new Database(_path);
+        database.Initialize();
+        database.SeedIfEmpty();
+
+        var syntheticCount = database.CountMarkers(MarkerSources.Synthetic);
+        var imported = new[]
+        {
+            new ImportedMarker("Телепорт: Монштадт", MarkerKind.Waypoint, 500, 500),
+            new ImportedMarker("Сундук у моста", MarkerKind.Chest, 505, 500)
+        };
+
+        database.ReplaceMarkers(MarkerSources.Real, imported);
+
+        Assert.Equal(2, database.CountMarkers(MarkerSources.Real));
+        Assert.Equal(syntheticCount, database.CountMarkers(MarkerSources.Synthetic));
+        Assert.Equal(2, database.QueryNearby(500, 500, 50, source: MarkerSources.Real).Count);
+        Assert.Single(database.GetWaypoints(MarkerSources.Real));
+        Assert.Empty(database.QueryNearby(0, 0, 50, source: MarkerSources.Synthetic));
+
+        database.ReplaceMarkers(MarkerSources.Real, new[] { imported[0] });
+
+        Assert.Equal(1, database.CountMarkers(MarkerSources.Real));
     }
 
     public void Dispose()

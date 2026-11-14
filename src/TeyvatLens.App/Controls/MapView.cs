@@ -45,6 +45,11 @@ public sealed class MapView : FrameworkElement
 
     public double AtlasPxPerMeter { get; set; } = 2.0;
 
+    /// <summary>Мировые координаты левого верхнего пикселя атласа.</summary>
+    public double AtlasOriginXMeters { get; set; }
+
+    public double AtlasOriginZMeters { get; set; }
+
     public double WorldSizeM { get; set; } = 900.0;
 
     protected override void OnRender(DrawingContext dc)
@@ -68,8 +73,8 @@ public sealed class MapView : FrameworkElement
 
         var snapshot = _snapshot;
         var geo = snapshot?.Geo;
-        var centerX = geo?.X ?? WorldSizeM / 2;
-        var centerZ = geo?.Z ?? WorldSizeM / 2;
+        var centerX = geo?.X ?? AtlasOriginXMeters + WorldSizeM / 2;
+        var centerZ = geo?.Z ?? AtlasOriginZMeters + WorldSizeM / 2;
         var radius = snapshot?.RadiusM ?? 120.0;
         var halfExtent = Math.Max(24.0, radius * 1.14);
         var scale = side / (2 * halfExtent);
@@ -136,8 +141,8 @@ public sealed class MapView : FrameworkElement
         dc.PushTransform(new TranslateTransform(square.X, square.Y));
         dc.PushTransform(new ScaleTransform(atlasScale, atlasScale));
         dc.PushTransform(new TranslateTransform(
-            -worldLeft * AtlasPxPerMeter,
-            -worldTop * AtlasPxPerMeter));
+            -(worldLeft - AtlasOriginXMeters) * AtlasPxPerMeter,
+            -(worldTop - AtlasOriginZMeters) * AtlasPxPerMeter));
         dc.DrawImage(Atlas!, new Rect(0, 0, Atlas!.PixelWidth, Atlas!.PixelHeight));
         dc.Pop();
         dc.Pop();

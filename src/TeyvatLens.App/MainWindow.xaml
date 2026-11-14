@@ -141,16 +141,16 @@
                                     Padding="3"
                                     Margin="0,10,0,0">
                                 <UniformGrid Columns="2">
+                                    <RadioButton x:Name="ScreenModeRadio"
+                                                 GroupName="Mode"
+                                                 Style="{StaticResource Segment}"
+                                                 Content="Реальный мир"
+                                                 IsChecked="True"
+                                                 Checked="OnModeChanged"/>
                                     <RadioButton x:Name="DemoModeRadio"
                                                  GroupName="Mode"
                                                  Style="{StaticResource Segment}"
                                                  Content="Демо-мир"
-                                                 IsChecked="True"
-                                                 Checked="OnModeChanged"/>
-                                    <RadioButton x:Name="ScreenModeRadio"
-                                                 GroupName="Mode"
-                                                 Style="{StaticResource Segment}"
-                                                 Content="Захват экрана"
                                                  Checked="OnModeChanged"/>
                                 </UniformGrid>
                             </Border>
@@ -159,6 +159,29 @@
                                     Margin="0,10,0,0"
                                     Click="OnCalibrate"/>
                             <TextBlock x:Name="CaptureInfoText"
+                                       Style="{StaticResource MutedText}"
+                                       Margin="0,8,0,0"
+                                       FontSize="11.5"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border x:Name="RealMapCard" Style="{StaticResource Card}" Margin="0,12,0,0">
+                        <StackPanel>
+                            <TextBlock Text="КАРТА ТЕЙВАТА" Style="{StaticResource CardTitle}"/>
+                            <TextBlock Style="{StaticResource MutedText}"
+                                       Margin="0,8,0,10"
+                                       FontSize="11.5"
+                                       TextWrapping="Wrap"
+                                       Text="Загрузите скриншот интерактивной карты и импортируйте точки. Телепорты станут опорными точками привязки."/>
+                            <Button x:Name="LoadMapButton"
+                                    Content="Загрузить карту…"
+                                    Click="OnLoadRealMap"/>
+                            <Button x:Name="ImportPointsButton"
+                                    Content="Импорт точек (JSON)…"
+                                    Margin="0,8,0,0"
+                                    Click="OnImportPoints"/>
+                            <TextBlock x:Name="RealMapInfoText"
                                        Style="{StaticResource MutedText}"
                                        Margin="0,8,0,0"
                                        FontSize="11.5"
@@ -279,7 +302,7 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                    <Border x:Name="DemoCard" Style="{StaticResource Card}" Margin="0,12,0,0">
                         <StackPanel>
                             <TextBlock Text="ДЕМОНСТРАЦИЯ" Style="{StaticResource CardTitle}"/>
                             <Grid Margin="0,12,0,0">

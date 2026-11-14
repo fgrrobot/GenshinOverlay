@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using TeyvatLens.Core.Geometry;
 using TeyvatLens.Core.Models;
+using TeyvatLens.Core.RealMap;
 
 namespace TeyvatLens.Core.Data;
 
@@ -77,6 +78,9 @@ public sealed class Database : IDisposable
             );
             """);
 
+        // Старые базы не знали про source: считаем такие маркеры демонстрационными.
+        Execute("UPDATE marker SET source = 'synthetic' WHERE source IS NULL;");
+
         RebuildRTreeIfNeeded();
     }
 
@@ -94,10 +98,98 @@ public sealed class Database : IDisposable
         return added;
     }
 
-    public long CountMarkers() => ScalarLong("SELECT COUNT(*) FROM marker;");
+    /// <summary>
+    /// Полностью заменяет маркеры одного источника (например, real)
+    /// импортированными точками и перестраивает пространственный индекс.
+    /// </summary>
+    public int ReplaceMarkers(string source, IReadOnlyList<ImportedMarker> markers)
+    {
+        using var transaction = _connection.BeginTransaction();
 
-    public long CountCollected() =>
-        ScalarLong("SELECT COUNT(*) FROM marker_state WHERE state = 'collected';");
+        using (var delete = _connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM marker WHERE source = $source;";
+            delete.Parameters.AddWithValue("$source", source);
+            delete.ExecuteNonQuery();
+        }
+
+        using (var insert = _connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText =
+                """
+                INSERT INTO marker (kind_code, name, x, z, y, layer_id, region_code, source)
+                VALUES ($kind, $name, $x, $z, $y, 0, $region, $source);
+                """;
+            var kindParameter = insert.Parameters.Add("$kind", SqliteType.Text);
+            var nameParameter = insert.Parameters.Add("$name", SqliteType.Text);
+            var xParameter = insert.Parameters.Add("$x", SqliteType.Real);
+            var zParameter = insert.Parameters.Add("$z", SqliteType.Real);
+            var yParameter = insert.Parameters.Add("$y", SqliteType.Real);
+            var regionParameter = insert.Parameters.Add("$region", SqliteType.Text);
+            insert.Parameters.AddWithValue("$source", source);
+
+            foreach (var marker in markers)
+            {
+                kindParameter.Value = MarkerKinds.ToCode(marker.Kind);
+                nameParameter.Value = marker.Name;
+                xParameter.Value = marker.X;
+                zParameter.Value = marker.Z;
+                yParameter.Value = marker.Y is null ? DBNull.Value : marker.Y.Value;
+                regionParameter.Value = (object?)marker.Region ?? DBNull.Value;
+                insert.ExecuteNonQuery();
+            }
+        }
+
+        using (var rebuild = _connection.CreateCommand())
+        {
+            rebuild.Transaction = transaction;
+            rebuild.CommandText =
+                """
+                DELETE FROM marker_rtree;
+                INSERT INTO marker_rtree (id, min_x, max_x, min_z, max_z)
+                SELECT id, x, x, z, z FROM marker;
+                """;
+            rebuild.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+        return markers.Count;
+    }
+
+    public long CountMarkers(string? source = null)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = source is null
+            ? "SELECT COUNT(*) FROM marker;"
+            : "SELECT COUNT(*) FROM marker WHERE source = $source;";
+        if (source is not null)
+        {
+            command.Parameters.AddWithValue("$source", source);
+        }
+
+        return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
+    }
+
+    public long CountCollected(string? source = null)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = source is null
+            ? "SELECT COUNT(*) FROM marker_state WHERE state = 'collected';"
+            : """
+              SELECT COUNT(*)
+              FROM marker m
+              JOIN marker_state s ON s.marker_id = m.id
+              WHERE s.state = 'collected' AND m.source = $source;
+              """;
+        if (source is not null)
+        {
+            command.Parameters.AddWithValue("$source", source);
+        }
+
+        return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
+    }
 
     public Marker? GetMarker(long id)
     {
@@ -116,7 +208,7 @@ public sealed class Database : IDisposable
         return reader.Read() ? ReadMarker(reader) : null;
     }
 
-    public IReadOnlyList<Marker> GetWaypoints()
+    public IReadOnlyList<Marker> GetWaypoints(string? source = null)
     {
         var result = new List<Marker>();
         using var command = _connection.CreateCommand();
@@ -127,8 +219,10 @@ public sealed class Database : IDisposable
             FROM marker m
             LEFT JOIN marker_state s ON s.marker_id = m.id
             WHERE m.kind_code = 'waypoint'
+              AND ($source IS NULL OR m.source = $source)
             ORDER BY m.name;
             """;
+        command.Parameters.AddWithValue("$source", (object?)source ?? DBNull.Value);
 
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -146,7 +240,8 @@ public sealed class Database : IDisposable
         double radiusM,
         int layerId = 0,
         MarkerKind? kindFilter = null,
-        int limit = 200)
+        int limit = 200,
+        string? source = null)
     {
         if (radiusM <= 0)
         {
@@ -167,6 +262,7 @@ public sealed class Database : IDisposable
               AND r.max_z >= $minZ AND r.min_z <= $maxZ
               AND m.layer_id = $layer
               AND ($kind = 'all' OR m.kind_code = $kind)
+              AND ($source IS NULL OR m.source = $source)
             ORDER BY d2
             LIMIT $limit;
             """;
@@ -180,6 +276,7 @@ public sealed class Database : IDisposable
         command.Parameters.AddWithValue("$layer", layerId);
         command.Parameters.AddWithValue("$kind", kindFilter is null ? "all" : MarkerKinds.ToCode(kindFilter.Value));
         command.Parameters.AddWithValue("$limit", limit);
+        command.Parameters.AddWithValue("$source", (object?)source ?? DBNull.Value);
 
         using var reader = command.ExecuteReader();
         while (reader.Read())

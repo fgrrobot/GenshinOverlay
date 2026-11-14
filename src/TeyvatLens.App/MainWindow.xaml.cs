@@ -9,6 +9,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using TeyvatLens.Core;
 using TeyvatLens.Core.App;
 using TeyvatLens.Core.Models;
@@ -26,6 +27,7 @@ public partial class MainWindow : Window
 
     private readonly AppSession _session;
     private BitmapSource? _atlas;
+    private BitmapSource? _realAtlas;
     private long? _selectedMarkerId;
     private double _lastTick;
     private bool _suppressEvents = true;
@@ -49,6 +51,7 @@ public partial class MainWindow : Window
         MarkerList.ItemsSource = _rows;
 
         LoadAtlas();
+        LoadRealAtlas();
         BuildKindFilter(session.Settings.KindFilter);
         LoadWaypoints();
         ApplySettingsToUi();
@@ -64,12 +67,15 @@ public partial class MainWindow : Window
         base.OnClosed(e);
     }
 
-    private void LoadAtlas()
+    private void LoadAtlas() => _atlas = LoadBitmap(AppPaths.DemoAtlasPath);
+
+    private void LoadRealAtlas() => _realAtlas = LoadBitmap(_session.Settings.RealAtlasPath);
+
+    private static BitmapSource? LoadBitmap(string path)
     {
-        var path = AppPaths.DemoAtlasPath;
-        if (!File.Exists(path))
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            return;
+            return null;
         }
 
         try
@@ -84,7 +90,7 @@ public partial class MainWindow : Window
                     Int32Rect.Empty,
                     BitmapSizeOptions.FromEmptyOptions());
                 source.Freeze();
-                _atlas = source;
+                return source;
             }
             finally
             {
@@ -94,7 +100,7 @@ public partial class MainWindow : Window
         catch (Exception)
         {
             // Атлас не критичен: карта нарисует сетку.
-            _atlas = null;
+            return null;
         }
     }
 
@@ -140,11 +146,21 @@ public partial class MainWindow : Window
         var screen = settings.Mode == SessionMode.Screen;
 
         CalibrateButton.Visibility = screen ? Visibility.Visible : Visibility.Collapsed;
+        RealMapCard.Visibility = screen ? Visibility.Visible : Visibility.Collapsed;
+        DemoCard.Visibility = screen ? Visibility.Collapsed : Visibility.Visible;
         CaptureInfoText.Text = screen
             ? $"Область {settings.ScreenRect.X},{settings.ScreenRect.Y} · " +
               $"{settings.ScreenRect.Width}×{settings.ScreenRect.Height} px · " +
               $"{settings.ScreenPxPerMeter:F1} px/м"
             : "Синтетический мир 900×900 м: атлас, маршрут и объекты генерируются локально.";
+
+        var profile = settings.RealProfile;
+        RealMapInfoText.Text = !screen
+            ? string.Empty
+            : !profile.IsValid
+                ? "Карта не загружена — показана сетка. Загрузите изображение карты и импортируйте точки."
+                : $"{Path.GetFileName(profile.AtlasPath)} · {profile.PxPerMeter:0.###} px/м · " +
+                  $"точек: {_session.CountRealMarkers()}";
     }
 
     private void UpdateUi(SessionSnapshot snapshot)
@@ -184,7 +200,26 @@ public partial class MainWindow : Window
             Compass.HeadingDeg = snapshot.Geo?.HeadingDeg ?? 0;
             Compass.TargetBearingDeg = snapshot.Hint?.Target.BearingDeg;
 
-            Map.Atlas = snapshot.Mode == SessionMode.Demo ? _atlas : null;
+            var settings = _session.Settings;
+            if (snapshot.Mode == SessionMode.Demo)
+            {
+                Map.Atlas = _atlas;
+                Map.AtlasPxPerMeter = 2.0;
+                Map.AtlasOriginXMeters = 0;
+                Map.AtlasOriginZMeters = 0;
+                Map.WorldSizeM = 900.0;
+            }
+            else
+            {
+                Map.Atlas = _realAtlas;
+                Map.AtlasPxPerMeter = settings.RealPxPerMeter;
+                Map.AtlasOriginXMeters = settings.RealOriginXMeters;
+                Map.AtlasOriginZMeters = settings.RealOriginZMeters;
+                Map.WorldSizeM = _realAtlas is null
+                    ? 900.0
+                    : _realAtlas.PixelWidth / Math.Max(0.001, settings.RealPxPerMeter);
+            }
+
             Map.Snapshot = snapshot;
 
             NearbyCountText.Text = snapshot.Markers.Count == 0
@@ -373,6 +408,7 @@ public partial class MainWindow : Window
         var mode = ScreenModeRadio.IsChecked == true ? SessionMode.Screen : SessionMode.Demo;
         _session.SetMode(mode);
         _timer.Stop();
+        LoadWaypoints();
         SyncModeUi();
         UpdateUi(_session.CurrentSnapshot());
     }
@@ -405,6 +441,93 @@ public partial class MainWindow : Window
                 "Teyvat Lens",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+        }
+    }
+
+    private void OnLoadRealMap(object sender, RoutedEventArgs e)
+    {
+        var dialog = new RealMapDialog(_session.Settings.RealProfile)
+        {
+            Owner = this
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            _session.SetRealMap(dialog.Profile);
+            LoadRealAtlas();
+            LoadWaypoints();
+            _timer.Stop();
+            SyncModeUi();
+            UpdateUi(_session.CurrentSnapshot());
+        }
+        catch (ArgumentException exception)
+        {
+            MessageBox.Show(
+                exception.Message,
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    private void OnImportPoints(object sender, RoutedEventArgs e)
+    {
+        if (!_session.Settings.RealProfile.IsValid)
+        {
+            MessageBox.Show(
+                "Сначала загрузите карту Тейвата и задайте масштаб.",
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = "Точки интерактивной карты",
+            Filter = "JSON (*.json)|*.json|Все файлы (*.*)|*.*",
+            CheckFileExists = true
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var result = _session.ImportRealMarkers(dialog.FileName);
+            LoadWaypoints();
+            SyncModeUi();
+            UpdateUi(_session.CurrentSnapshot());
+
+            var message = result.Total == 0
+                ? "В файле не найдено поддерживаемых точек."
+                : $"Импортировано точек: {result.Total}.";
+            if (result.Skipped > 0)
+            {
+                message += $"\nПропущено: {result.Skipped}.\n" +
+                           string.Join("\n", result.Warnings.Take(5));
+            }
+
+            MessageBox.Show(
+                message,
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                result.Total == 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"Не удалось импортировать точки:\n{exception.Message}",
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
         }
     }
 

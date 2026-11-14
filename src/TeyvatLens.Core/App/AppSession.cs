@@ -6,6 +6,7 @@ using TeyvatLens.Core.Geometry;
 using TeyvatLens.Core.Localization;
 using TeyvatLens.Core.Models;
 using TeyvatLens.Core.Navigation;
+using TeyvatLens.Core.RealMap;
 using TeyvatLens.Core.Simulation;
 using TeyvatLens.Core.Vision;
 
@@ -54,7 +55,10 @@ public sealed class AppSession : IDisposable
 
     public bool IsPaused => _paused;
 
-    public IReadOnlyList<Marker> GetWaypoints() => _database.GetWaypoints();
+    public IReadOnlyList<Marker> GetWaypoints() => _database.GetWaypoints(CurrentSource);
+
+    private string CurrentSource =>
+        _settings.Mode == SessionMode.Demo ? MarkerSources.Synthetic : MarkerSources.Real;
 
     /// <summary>Запускает сценарий с нуля или продолжает после паузы.</summary>
     public bool StartOrResume(out string? error)
@@ -96,7 +100,7 @@ public sealed class AppSession : IDisposable
             _tracker.Reset();
             _headingSmooth = 0;
             _status = TrackingStatus.Lost;
-            _message = "Выберите точку привязки — телепорт в игре";
+            _message = "Выберите телепорт на карте и нажмите «Привязать позицию»";
         }
 
         _running = true;
@@ -140,7 +144,7 @@ public sealed class AppSession : IDisposable
         _status = TrackingStatus.Idle;
         _message = mode == SessionMode.Demo
             ? "Демо-мир готов к запуску"
-            : "Настройте область захвата и привяжите позицию";
+            : "Загрузите карту Тейвата, импортируйте точки и привяжитесь к телепорту";
     }
 
     /// <summary>Обрабатывает один кадр. Возвращает снимок для интерфейса.</summary>
@@ -295,6 +299,60 @@ public sealed class AppSession : IDisposable
         _geo = null;
     }
 
+    /// <summary>Сохраняет привязку реального атласа и сбрасывает текущую сессию.</summary>
+    public void SetRealMap(MapProfile profile)
+    {
+        if (!profile.IsValid)
+        {
+            throw new ArgumentException("Укажите файл карты и положительный масштаб");
+        }
+
+        _settings.RealAtlasPath = profile.AtlasPath;
+        _settings.RealPxPerMeter = profile.PxPerMeter;
+        _settings.RealOriginXMeters = profile.OriginXMeters;
+        _settings.RealOriginZMeters = profile.OriginZMeters;
+        _settings.Save(_database);
+
+        ResetSessionState("Карта Тейвата загружена — импортируйте точки и привяжитесь к телепорту");
+    }
+
+    /// <summary>Импортирует точки интерактивной карты и заменяет предыдущий набор.</summary>
+    public ImportResult ImportRealMarkers(string jsonPath)
+    {
+        if (!_settings.RealProfile.IsValid)
+        {
+            throw new InvalidOperationException("Сначала загрузите карту Тейвата и задайте масштаб");
+        }
+
+        var result = WaypointImporter.LoadFile(jsonPath, _settings.RealProfile);
+        _database.ReplaceMarkers(MarkerSources.Real, result.Markers);
+
+        ResetSessionState(result.Total == 0
+            ? "В файле не найдено поддерживаемых точек"
+            : $"Импортировано точек: {result.Total} — привяжитесь к телепорту");
+
+        return result;
+    }
+
+    public long CountRealMarkers() => _database.CountMarkers(MarkerSources.Real);
+
+    private void ResetSessionState(string message)
+    {
+        _running = false;
+        _paused = false;
+        _hasStarted = false;
+        _capture = null;
+        _tracker.Reset();
+        _geo = null;
+        _selectedMarkerId = null;
+        _markers = Array.Empty<NearbyMarker>();
+        _hint = null;
+        _truthErrorM = null;
+        _requiresSnap = false;
+        _status = TrackingStatus.Idle;
+        _message = message;
+    }
+
     public void SetDemoLost(bool lost)
     {
         _demo.Lost = lost;
@@ -367,7 +425,8 @@ public sealed class AppSession : IDisposable
             _geo!.X,
             _geo.Z,
             _settings.RadiusM,
-            kindFilter: _settings.KindFilter);
+            kindFilter: _settings.KindFilter,
+            source: CurrentSource);
         _hint = HintBuilder.BuildHint(_markers, _geo.HeadingDeg, _geo.Y);
     }
 
@@ -393,8 +452,8 @@ public sealed class AppSession : IDisposable
             _demo.Lost,
             _requiresSnap,
             _settings.Mode == SessionMode.Demo ? 0.0 : null,
-            _database.CountMarkers(),
-            _database.CountCollected());
+            _database.CountMarkers(CurrentSource),
+            _database.CountCollected(CurrentSource));
     }
 
     public void Dispose()

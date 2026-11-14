@@ -39,7 +39,7 @@ public static class StatusText
     public static string ModeLabel(SessionMode mode) => mode switch
     {
         SessionMode.Demo => "Демо-мир",
-        SessionMode.Screen => "Захват экрана",
+        SessionMode.Screen => "Реальный мир",
         _ => mode.ToString()
     };
 }

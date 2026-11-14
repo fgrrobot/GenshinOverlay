@@ -1,5 +1,6 @@
 using System.Drawing;
 using TeyvatLens.Core.Models;
+using TeyvatLens.Core.RealMap;
 
 namespace TeyvatLens.Core.App;
 
@@ -10,11 +11,26 @@ public sealed class SessionSettings
 
     public MarkerKind? KindFilter { get; set; }
 
-    public SessionMode Mode { get; set; } = SessionMode.Demo;
+    /// <summary>По умолчанию приложение работает с реальной картой и экраном игры.</summary>
+    public SessionMode Mode { get; set; } = SessionMode.Screen;
 
     public Rectangle ScreenRect { get; set; } = new(24, 24, 240, 240);
 
     public double ScreenPxPerMeter { get; set; } = 2.0;
+
+    /// <summary>Путь к изображению реальной карты (скриншот интерактивной карты).</summary>
+    public string RealAtlasPath { get; set; } = string.Empty;
+
+    /// <summary>Сколько пикселей атласа приходится на один метр мира.</summary>
+    public double RealPxPerMeter { get; set; } = 1.0;
+
+    /// <summary>Мировые координаты левого верхнего пикселя атласа.</summary>
+    public double RealOriginXMeters { get; set; }
+
+    public double RealOriginZMeters { get; set; }
+
+    public MapProfile RealProfile =>
+        new(RealAtlasPath, RealPxPerMeter, RealOriginXMeters, RealOriginZMeters);
 
     public static SessionSettings Load(Data.Database database)
     {
@@ -39,9 +55,15 @@ public sealed class SessionSettings
         }
 
         var mode = database.GetSetting("mode");
-        if (string.Equals(mode, "screen", StringComparison.OrdinalIgnoreCase))
+        settings.Mode = string.Equals(mode, "demo", StringComparison.OrdinalIgnoreCase)
+            ? SessionMode.Demo
+            : SessionMode.Screen;
+
+        // Один раз переводим существующие установки на реальный режим по умолчанию.
+        if (!string.Equals(database.GetSetting("real_default_v1"), "1", StringComparison.Ordinal))
         {
             settings.Mode = SessionMode.Screen;
+            database.SetSetting("real_default_v1", "1");
         }
 
         var rect = database.GetSetting("screen_rect");
@@ -65,6 +87,22 @@ public sealed class SessionSettings
             settings.ScreenPxPerMeter = Math.Clamp(ppm, 0.2, 20.0);
         }
 
+        settings.RealAtlasPath = database.GetSetting("real_atlas_path") ?? string.Empty;
+        if (double.TryParse(database.GetSetting("real_ppm"), out var realPpm) && realPpm > 0)
+        {
+            settings.RealPxPerMeter = Math.Clamp(realPpm, 0.001, 1000.0);
+        }
+
+        if (double.TryParse(database.GetSetting("real_origin_x"), out var originX))
+        {
+            settings.RealOriginXMeters = originX;
+        }
+
+        if (double.TryParse(database.GetSetting("real_origin_z"), out var originZ))
+        {
+            settings.RealOriginZMeters = originZ;
+        }
+
         return settings;
     }
 
@@ -72,10 +110,14 @@ public sealed class SessionSettings
     {
         database.SetSetting("radius_m", RadiusM.ToString("0.##"));
         database.SetSetting("kind_filter", KindFilter is null ? "all" : MarkerKinds.ToCode(KindFilter.Value));
-        database.SetSetting("mode", Mode == SessionMode.Screen ? "screen" : "demo");
+        database.SetSetting("mode", Mode == SessionMode.Demo ? "demo" : "screen");
         database.SetSetting(
             "screen_rect",
             $"{ScreenRect.X},{ScreenRect.Y},{ScreenRect.Width},{ScreenRect.Height}");
         database.SetSetting("screen_ppm", ScreenPxPerMeter.ToString("0.##"));
+        database.SetSetting("real_atlas_path", RealAtlasPath);
+        database.SetSetting("real_ppm", RealPxPerMeter.ToString("0.####"));
+        database.SetSetting("real_origin_x", RealOriginXMeters.ToString("0.##"));
+        database.SetSetting("real_origin_z", RealOriginZMeters.ToString("0.##"));
     }
 }
