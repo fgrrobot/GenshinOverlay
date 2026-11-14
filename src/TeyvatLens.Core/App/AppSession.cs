@@ -250,8 +250,20 @@ public sealed class AppSession : IDisposable
         _status = TrackingStatus.Tracking;
         _requiresSnap = false;
         _message = $"Позиция привязана: {marker.Name}";
-        _markers = Array.Empty<NearbyMarker>();
-        _hint = null;
+
+        // Показываем позицию сразу после привязки, не дожидаясь первого кадра.
+        _geo = new GeoState(
+            marker.X,
+            marker.Z,
+            _settings.Mode == SessionMode.Demo ? 0.0 : null,
+            _headingSmooth,
+            1.0,
+            "snap",
+            0,
+            null,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
+
+        RefreshMarkers();
         return true;
     }
 
@@ -468,8 +480,7 @@ public sealed class AppSession : IDisposable
 
     private SessionSnapshot BuildSnapshot()
     {
-        var show = _running
-            && (_status == TrackingStatus.Tracking || _status == TrackingStatus.Degraded)
+        var show = (_status == TrackingStatus.Tracking || _status == TrackingStatus.Degraded)
             && _geo is not null;
 
         return new SessionSnapshot(
