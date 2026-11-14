@@ -5,6 +5,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -13,6 +14,7 @@ using Microsoft.Win32;
 using TeyvatLens.Core;
 using TeyvatLens.Core.App;
 using TeyvatLens.Core.Models;
+using TeyvatLens.Core.RealMap.GenshinMap;
 using CoreStatus = TeyvatLens.Core.Models.StatusText;
 
 namespace TeyvatLens.App;
@@ -26,12 +28,14 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _radiusTimer;
 
     private readonly AppSession _session;
+    private readonly GenshinMapService _genshin = new(AppPaths.GenshinCacheDir);
     private BitmapSource? _atlas;
     private BitmapSource? _realAtlas;
     private long? _selectedMarkerId;
     private double _lastTick;
     private bool _suppressEvents = true;
     private bool _updating;
+    private bool _busy;
 
     public MainWindow(AppSession session)
     {
@@ -64,6 +68,7 @@ public partial class MainWindow : Window
     {
         _timer.Stop();
         _radiusTimer.Stop();
+        _genshin.Dispose();
         base.OnClosed(e);
     }
 
@@ -444,6 +449,80 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void OnLoadFromGenshinMap(object sender, RoutedEventArgs e)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        double? centerX = null;
+        double? centerZ = null;
+        if (WaypointCombo.SelectedItem is Marker selected)
+        {
+            centerX = selected.X;
+            centerZ = selected.Z;
+        }
+
+        SetBusy(true, "Загружаю карту Тейвата…");
+
+        try
+        {
+            var progress = new Progress<string>(text => RealMapInfoText.Text = text);
+            var result = await _genshin.LoadAsync(centerX, centerZ, progress, CancellationToken.None);
+
+            _session.ApplyRealMap(result.Profile, result.Markers.Markers);
+            LoadRealAtlas();
+            LoadWaypoints();
+            _timer.Stop();
+            UpdateUi(_session.CurrentSnapshot());
+
+            var message =
+                $"Загружено точек: {result.Markers.Total}.\n" +
+                $"Фрагмент карты: {result.Region.Left}, {result.Region.Top} · {result.Region.SizePx} px.\n" +
+                "Выберите телепорт и нажмите «Привязать позицию».";
+
+            if (result.Markers.Warnings.Count > 0)
+            {
+                message += "\n" + string.Join("\n", result.Markers.Warnings.Take(4));
+            }
+
+            MessageBox.Show(
+                message,
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"Не удалось загрузить карту:\n{exception.Message}",
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            SetBusy(false, null);
+            SyncModeUi();
+        }
+    }
+
+    private void SetBusy(bool busy, string? message)
+    {
+        _busy = busy;
+        AutoMapButton.IsEnabled = !busy;
+        LoadMapButton.IsEnabled = !busy;
+        ImportPointsButton.IsEnabled = !busy;
+
+        if (message is not null)
+        {
+            RealMapInfoText.Text = message;
+        }
+
+        Mouse.OverrideCursor = busy ? System.Windows.Input.Cursors.Wait : null;
+    }
+
     private void OnLoadRealMap(object sender, RoutedEventArgs e)
     {
         var dialog = new RealMapDialog(_session.Settings.RealProfile)
@@ -531,7 +610,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void OnSnap(object sender, RoutedEventArgs e)
+    private async void OnSnap(object sender, RoutedEventArgs e)
     {
         if (WaypointCombo.SelectedItem is not Marker waypoint)
         {
@@ -545,6 +624,38 @@ public partial class MainWindow : Window
 
         _session.SnapTo(waypoint.Id);
         UpdateUi(_session.CurrentSnapshot());
+
+        // Если точка вне загруженного фрагмента карты — догружаем нужный квадрат.
+        if (_session.Mode != SessionMode.Screen || _realAtlas is null || _busy)
+        {
+            return;
+        }
+
+        try
+        {
+            var profile = _session.Settings.RealProfile;
+            var updated = await _genshin.EnsureRegionAsync(
+                profile,
+                _realAtlas.PixelWidth,
+                waypoint.X,
+                waypoint.Z,
+                null,
+                CancellationToken.None);
+
+            if (updated is null)
+            {
+                return;
+            }
+
+            _session.UpdateRealAtlas(updated);
+            LoadRealAtlas();
+            SyncModeUi();
+            UpdateUi(_session.CurrentSnapshot());
+        }
+        catch (Exception exception)
+        {
+            RealMapInfoText.Text = $"Карта не догрузилась: {exception.Message}";
+        }
     }
 
     private void OnRadiusChanged(object sender, RoutedPropertyChangedEventArgs<double> e)

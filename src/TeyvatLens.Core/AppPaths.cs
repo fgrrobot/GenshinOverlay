@@ -11,6 +11,9 @@ public static class AppPaths
 
     public static string DemoAtlasPath => Path.Combine(DataDir, "demo_atlas.png");
 
+    /// <summary>Кэш скачанных данных интерактивной карты.</summary>
+    public static string GenshinCacheDir => Path.Combine(DataDir, "cache", "hoyolab");
+
     private static string FindProjectRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

@@ -13,6 +13,7 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/demo_atlas.png
+data/cache/
 
 # Прочее
 *.log

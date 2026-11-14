@@ -334,6 +334,42 @@ public sealed class AppSession : IDisposable
         return result;
     }
 
+    /// <summary>Применяет скачанную с интерактивной карты карту и её точки за один шаг.</summary>
+    public void ApplyRealMap(MapProfile profile, IReadOnlyList<ImportedMarker> markers)
+    {
+        if (!profile.IsValid)
+        {
+            throw new ArgumentException("Укажите файл карты и положительный масштаб");
+        }
+
+        _settings.RealAtlasPath = profile.AtlasPath;
+        _settings.RealPxPerMeter = profile.PxPerMeter;
+        _settings.RealOriginXMeters = profile.OriginXMeters;
+        _settings.RealOriginZMeters = profile.OriginZMeters;
+        _settings.Save(_database);
+
+        _database.ReplaceMarkers(MarkerSources.Real, markers);
+
+        ResetSessionState(markers.Count == 0
+            ? "Карта загружена, но подходящих точек не найдено"
+            : $"Загружено с карты Тейвата: {markers.Count} точек — привяжитесь к телепорту");
+    }
+
+    /// <summary>Меняет только фрагмент карты, не сбрасывая текущую привязку.</summary>
+    public void UpdateRealAtlas(MapProfile profile)
+    {
+        if (!profile.IsValid)
+        {
+            return;
+        }
+
+        _settings.RealAtlasPath = profile.AtlasPath;
+        _settings.RealPxPerMeter = profile.PxPerMeter;
+        _settings.RealOriginXMeters = profile.OriginXMeters;
+        _settings.RealOriginZMeters = profile.OriginZMeters;
+        _settings.Save(_database);
+    }
+
     public long CountRealMarkers() => _database.CountMarkers(MarkerSources.Real);
 
     private void ResetSessionState(string message)
