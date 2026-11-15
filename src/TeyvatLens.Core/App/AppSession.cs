@@ -421,7 +421,12 @@ public sealed class AppSession : IDisposable
         var pxPerMeter = _settings.Mode == SessionMode.Demo
             ? _demo.PxPerMeter
             : _settings.ScreenPxPerMeter;
-        return new OdometryTracker(pxPerMeter);
+        return new OdometryTracker(pxPerMeter)
+        {
+            // В демо курс известен точно, в реальном режиме его приходится
+            // выводить из направления движения.
+            AutoHeading = _settings.Mode != SessionMode.Demo
+        };
     }
 
     private void Apply(LocalizationResult result)

@@ -21,14 +21,25 @@ public sealed record LocalizationResult(
 /// Одометрия по миникарте и автомат состояний локализации.
 ///
 /// MVP реализует только относительный контур: смещение между соседними
-/// кадрами оценивается фазовой корреляцией. Абсолютная привязка делается
-/// вручную — «привязкой» к известной точке телепорта (план B из PROJECT.md).
+/// кадрами оценивается корреляцией. Абсолютная привязка делается вручную —
+/// «привязкой» к известной точке телепорта (план B из PROJECT.md).
 ///
-/// Почему своя фазовая корреляция, а не Cv2.PhaseCorrelate:
-/// встроенный субпиксельный оценщик (взвешенный центроид 3x3) систематически
-/// занижает дробную часть сдвига: при истинном 0.5 px он возвращает ~0.175 px.
-/// На дистанции это даёт масштабную ошибку в единицы процентов. Здесь пик
-/// уточняется параболической подгонкой по трём точкам, что на порядок точнее.
+/// Как оценивается сдвиг:
+/// 1) грубо — фазовая корреляция с окном Ханна: даёт целый пиксель;
+/// 2) точно — прямой поиск по взвешенной невязке (SSD) с бикубической
+///    интерполяцией на сетке 1/4 px и параболой по трём точкам.
+///
+/// Почему не парабола по трём отсчётам фазовой корреляции: пик там острый
+/// (почти дельта-функция), и вершина параболы систематически смещается к
+/// целому пикселю. Ошибка масштаба в проценты копится за сотни шагов, и
+/// карта «уезжает» на десятки метров.
+///
+/// Почему не Cv2.PhaseCorrelate: встроенный субпиксельный оценщик
+/// (взвешенный центроид 3x3) занижает дробную часть сдвига ещё сильнее:
+/// при истинном 0.5 px он возвращает ~0.175 px.
+///
+/// Веса при уточнении убирают центр (стрелка игрока не двигается вместе с
+/// картой и «тянет» оценку к нулю) и внешнюю рамку компаса.
 ///
 /// Почему корреляция идёт на нативном разрешении миникарты:
 /// предварительный ресайз (например, 360 -> 256) заметно искажает оценку
@@ -47,6 +58,30 @@ public sealed class OdometryTracker : IDisposable
     private const double MinResponse = 0.06;
     private const double MaxStepMetersDefault = 120.0;
 
+    /// <summary>Шаг сетки уточнения, px.</summary>
+    private const double RefineStep = 0.25;
+
+    /// <summary>Полуширина сетки уточнения в шагах (±1 px).</summary>
+    private const int RefineHalf = 2;
+
+    /// <summary>Радиус центрального «слепого» диска (стрелка игрока), доля от меньшей стороны.</summary>
+    private const double CenterHoleFraction = 0.14;
+
+    /// <summary>Ширина внешней рамки (компас), доля от меньшей стороны.</summary>
+    private const double BorderFraction = 0.08;
+
+    /// <summary>Радиус рабочей зоны миникарты, доля от меньшей стороны.</summary>
+    private const double DiscFraction = 0.42;
+
+    /// <summary>Поле, отбрасываемое при уточнении, доля от меньшей стороны.</summary>
+    private const double RoiMarginFraction = 0.18;
+
+    /// <summary>Минимальный шаг, при котором курс оценивается по направлению движения, м.</summary>
+    private const double MinAutoHeadingStepMeters = 0.2;
+
+    /// <summary>Доля, с которой новый азимут подмешивается к текущему курсу.</summary>
+    private const double AutoHeadingSmoothing = 0.35;
+
     private readonly double _pxPerMeter;
     private readonly double _lostAfterSeconds;
     private readonly double _lostConfidence;
@@ -57,6 +92,8 @@ public sealed class OdometryTracker : IDisposable
     private Mat? _previousPatch;
     private Mat? _window;
     private Size _windowSize;
+    private Mat? _fineMask;
+    private Size _fineMaskSize;
     private double _lostTimer;
 
     public OdometryTracker(
@@ -127,6 +164,14 @@ public sealed class OdometryTracker : IDisposable
 
     public void SetHeading(double headingDeg) =>
         HeadingDeg = GeoMath.NormalizeAngle(headingDeg);
+
+    /// <summary>
+    /// Оценивать курс по направлению движения. Нужно в режиме захвата экрана:
+    /// отдельного источника курса там нет, а стрелка должна смотреть туда,
+    /// куда идёт игрок. На месте курс не обновляется — шум в один пиксель
+    /// дал бы случайный азимут.
+    /// </summary>
+    public bool AutoHeading { get; set; }
 
     /// <summary>Обрабатывает кадр миникарты в исходном разрешении.</summary>
     public LocalizationResult Update(Mat? patch, double dt)
@@ -208,6 +253,15 @@ public sealed class OdometryTracker : IDisposable
         X = X!.Value + deltaX;
         Z = Z!.Value + deltaZ;
 
+        if (AutoHeading && step >= MinAutoHeadingStepMeters)
+        {
+            // Курс = азимут последнего смещения. Сглаживаем по кратчайшей
+            // дуге, иначе на переходе через 0°/360° стрелка дёргается.
+            var bearing = GeoMath.BearingDeg(X.Value - deltaX, Z.Value - deltaZ, X.Value, Z.Value);
+            var turn = GeoMath.AngleDelta(bearing, HeadingDeg);
+            HeadingDeg = GeoMath.NormalizeAngle(HeadingDeg + turn * AutoHeadingSmoothing);
+        }
+
         var target = GeoMath.Clamp((response - 0.03) / 0.35, 0.0, 1.0);
         Confidence = 0.72 * Confidence + 0.28 * target;
         _lostTimer = 0;
@@ -279,19 +333,8 @@ public sealed class OdometryTracker : IDisposable
         Cv2.MinMaxLoc(surface, out _, out var peakValue, out _, out var peak);
         var size = surface.Cols;
 
-        double At(int x, int y) => surface.At<float>((y + size) % size, (x + size) % size);
-
-        var center = At(peak.X, peak.Y);
-        var left = At(peak.X - 1, peak.Y);
-        var right = At(peak.X + 1, peak.Y);
-        var up = At(peak.X, peak.Y - 1);
-        var down = At(peak.X, peak.Y + 1);
-
-        var offsetX = ParabolicOffset(left, center, right);
-        var offsetY = ParabolicOffset(up, center, down);
-
-        var shiftX = peak.X + offsetX;
-        var shiftY = peak.Y + offsetY;
+        var shiftX = (double)peak.X;
+        var shiftY = (double)peak.Y;
         if (shiftX > size / 2.0)
         {
             shiftX -= size;
@@ -302,7 +345,172 @@ public sealed class OdometryTracker : IDisposable
             shiftY -= size;
         }
 
-        return (shiftX, shiftY, peakValue);
+        // Уточняем сдвиг прямым поиском по взвешенной невязке. Начинаем с
+        // целого пика: дальше ищем в пределах ±0.5 px, то есть там же, где
+        // лежит настоящий субпиксельный минимум.
+        var mask = EnsureFineMask(current.Size());
+        var roi = RoiRect(current.Size());
+        using var referenceRoi = new Mat(previous, roi);
+        using var currentRoi = new Mat(current, roi);
+        using var maskRoi = new Mat(mask, roi);
+
+        var (refinedX, refinedY) = RefineShift(
+            referenceRoi,
+            currentRoi,
+            maskRoi,
+            -Math.Round(shiftX),
+            -Math.Round(shiftY));
+
+        return (-refinedX, -refinedY, peakValue);
+    }
+
+    /// <summary>
+    /// Три прохода поиска по SSD: X, Y и снова X (сдвиги по осям слегка
+    /// связаны, повторный проход убирает остаток). Возвращает сдвиг, при
+    /// котором <paramref name="current"/> лучше всего совпадает с
+    /// <paramref name="reference"/>.
+    /// </summary>
+    private static (double X, double Y) RefineShift(
+        Mat reference,
+        Mat current,
+        Mat weights,
+        double startX,
+        double startY)
+    {
+        var x = startX;
+        var y = startY;
+        x += BestOffset(reference, current, weights, x, y, alongX: true);
+        y += BestOffset(reference, current, weights, x, y, alongX: false);
+        x += BestOffset(reference, current, weights, x, y, alongX: true);
+        return (x, y);
+    }
+
+    /// <summary>Парабола по трём точкам SSD-кривой вокруг лучшего отсчёта.</summary>
+    private static double BestOffset(
+        Mat reference,
+        Mat current,
+        Mat weights,
+        double fixedX,
+        double fixedY,
+        bool alongX)
+    {
+        var points = RefineHalf * 2 + 1;
+        var values = new double[points];
+        var bestIndex = 0;
+        var bestValue = double.MaxValue;
+
+        for (var index = 0; index < points; index++)
+        {
+            var offset = (index - RefineHalf) * RefineStep;
+            using var warped = alongX
+                ? Warp(current, fixedX + offset, fixedY)
+                : Warp(current, fixedX, fixedY + offset);
+            var value = MaskedSsd(reference, warped, weights);
+            values[index] = value;
+            if (value < bestValue)
+            {
+                bestValue = value;
+                bestIndex = index;
+            }
+        }
+
+        var refine = bestIndex > 0 && bestIndex < points - 1
+            ? ParabolicOffset(values[bestIndex - 1], values[bestIndex], values[bestIndex + 1]) * RefineStep
+            : 0.0;
+
+        return (bestIndex - RefineHalf) * RefineStep + refine;
+    }
+
+    /// <summary>Сдвиг кадра на дробное число пикселей с бикубической интерполяцией.</summary>
+    private static Mat Warp(Mat source, double dx, double dy)
+    {
+        using var matrix = new Mat<double>(2, 3);
+        matrix.Set(0, 0, 1.0);
+        matrix.Set(0, 1, 0.0);
+        matrix.Set(0, 2, dx);
+        matrix.Set(1, 0, 0.0);
+        matrix.Set(1, 1, 1.0);
+        matrix.Set(1, 2, dy);
+
+        var result = new Mat();
+        Cv2.WarpAffine(
+            source,
+            result,
+            matrix,
+            source.Size(),
+            InterpolationFlags.Cubic,
+            BorderTypes.Replicate);
+        return result;
+    }
+
+    /// <summary>Взвешенная сумма квадратов разницы.</summary>
+    private static double MaskedSsd(Mat reference, Mat warped, Mat weights)
+    {
+        using var difference = new Mat();
+        Cv2.Subtract(warped, reference, difference);
+        using var squared = new Mat();
+        Cv2.Multiply(difference, difference, squared);
+        using var weighted = new Mat();
+        Cv2.Multiply(squared, weights, weighted);
+        return Cv2.Sum(weighted).Val0;
+    }
+
+    private static Rect RoiRect(Size size)
+    {
+        var side = Math.Min(size.Width, size.Height);
+        var margin = Math.Max(4, (int)Math.Round(side * RoiMarginFraction));
+        margin = Math.Min(margin, side / 3);
+        return new Rect(margin, margin, size.Width - 2 * margin, size.Height - 2 * margin);
+    }
+
+    /// <summary>
+    /// Веса уточнения: окно Ханна без центрального диска (там стрелка
+    /// игрока — она не двигается вместе с картой и «тянет» оценку к нулю)
+    /// и без внешней рамки компаса.
+    /// </summary>
+    private Mat EnsureFineMask(Size size)
+    {
+        if (_fineMask is not null && _fineMaskSize == size)
+        {
+            return _fineMask;
+        }
+
+        _fineMask?.Dispose();
+        _fineMask = new Mat();
+        Cv2.CreateHanningWindow(_fineMask, size, MatType.CV_32F);
+
+        var side = Math.Min(size.Width, size.Height);
+        var centerX = size.Width / 2.0;
+        var centerY = size.Height / 2.0;
+        var radius = side * CenterHoleFraction;
+        var border = side * BorderFraction;
+        var disc = side * DiscFraction;
+
+        for (var y = 0; y < size.Height; y++)
+        {
+            for (var x = 0; x < size.Width; x++)
+            {
+                var dx = x - centerX + 0.5;
+                var dy = y - centerY + 0.5;
+                var distanceSquared = dx * dx + dy * dy;
+                var insideHole = distanceSquared < radius * radius;
+
+                // Углы квадратного кадра вне круга миникарты статичны: если их
+                // не обнулить, корреляция «увидит» совпадение при нулевом сдвиге.
+                var outsideDisc = distanceSquared > disc * disc;
+                var insideBorder = x < border
+                    || y < border
+                    || x >= size.Width - border
+                    || y >= size.Height - border;
+                if (insideHole || outsideDisc || insideBorder)
+                {
+                    _fineMask.Set(y, x, 0f);
+                }
+            }
+        }
+
+        _fineMaskSize = size;
+        return _fineMask;
     }
 
     private static double ParabolicOffset(double before, double center, double after)
@@ -380,6 +588,8 @@ public sealed class OdometryTracker : IDisposable
         _previousPatch = null;
         _window?.Dispose();
         _window = null;
+        _fineMask?.Dispose();
+        _fineMask = null;
         _clahe.Dispose();
     }
 }

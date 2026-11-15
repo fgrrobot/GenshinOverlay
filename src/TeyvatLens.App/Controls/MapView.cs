@@ -8,9 +8,9 @@ using TeyvatLens.Core.Models;
 namespace TeyvatLens.App.Controls;
 
 /// <summary>
-/// Карта мира в духе Genshin Impact: вращается вместе с игроком так, что
-/// направление взгляда всегда смотрит вверх. Игрок — в центре, север
-/// обозначен буквой «С», которая смещается по краю карты.
+/// Карта мира в духе Genshin Impact. Карта всегда ориентирована на север
+/// (как интерактивная карта Тейвата), а по курсу поворачивается только
+/// стрелка игрока в центре. Север отмечен буквой «С» сверху.
 /// </summary>
 public sealed class MapView : FrameworkElement
 {
@@ -30,6 +30,13 @@ public sealed class MapView : FrameworkElement
     private static readonly Pen HintPen = CreateHintPen();
 
     private SessionSnapshot? _snapshot;
+
+    public MapView()
+    {
+        // Карта — растровая картинка, которую почти всегда увеличивают.
+        // Сглаживание делает её «мыльной», поэтому пиксели не размываем.
+        RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.NearestNeighbor);
+    }
 
     public SessionSnapshot? Snapshot
     {
@@ -60,7 +67,6 @@ public sealed class MapView : FrameworkElement
             return;
         }
 
-        RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.HighQuality);
         dc.DrawRectangle(BackgroundBrush, null, bounds);
 
         var side = Math.Min(bounds.Width, bounds.Height);
@@ -82,9 +88,8 @@ public sealed class MapView : FrameworkElement
 
         dc.PushClip(new RectangleGeometry(bounds, 16, 16));
 
-        // Мир вращается вокруг игрока: направление взгляда всегда сверху.
-        dc.PushTransform(new RotateTransform(-heading, center.X, center.Y));
-
+        // Карта всегда «на север»: так её проще сопоставлять с интерактивной
+        // картой и маркерами. По курсу поворачивается только стрелка игрока.
         if (Atlas is not null)
         {
             DrawAtlas(dc, square, centerX, centerZ, halfExtent, scale);
@@ -106,21 +111,19 @@ public sealed class MapView : FrameworkElement
 
         if (snapshot is not null && geo is not null)
         {
-            DrawMarkers(dc, square, center, geo, snapshot, scale, heading);
+            DrawMarkers(dc, square, center, geo, snapshot, scale);
         }
-
-        dc.Pop();
 
         if (geo is not null)
         {
-            DrawPlayer(dc, center);
+            DrawPlayer(dc, center, heading);
         }
         else
         {
             DrawPlaceholder(dc, center);
         }
 
-        DrawNorth(dc, center, side, heading);
+        DrawNorth(dc, center, side);
 
         dc.Pop();
         dc.DrawRoundedRectangle(null, BorderPen, new Rect(0.5, 0.5, bounds.Width - 1, bounds.Height - 1), 16, 16);
@@ -191,8 +194,7 @@ public sealed class MapView : FrameworkElement
         Point center,
         GeoState geo,
         SessionSnapshot snapshot,
-        double scale,
-        double headingDeg)
+        double scale)
     {
         foreach (var item in snapshot.Markers)
         {
@@ -220,12 +222,10 @@ public sealed class MapView : FrameworkElement
 
             dc.PushOpacity(marker.Collected ? 0.45 : 1.0);
 
-            // Иконки остаются вертикальными, пока сама карта вращается.
-            dc.PushTransform(new RotateTransform(headingDeg, point.X, point.Y));
+            // Карта не вращается, поэтому иконки всегда стоят вертикально.
             dc.PushTransform(new TranslateTransform(point.X - size / 2, point.Y - size / 2));
             dc.PushTransform(new ScaleTransform(size / 24.0, size / 24.0));
             dc.DrawDrawing(MarkerIcons.GetDrawing(marker.Kind));
-            dc.Pop();
             dc.Pop();
             dc.Pop();
             dc.Pop();
@@ -246,11 +246,14 @@ public sealed class MapView : FrameworkElement
         dc.DrawLine(HintPen, center, target);
     }
 
-    private static void DrawPlayer(DrawingContext dc, Point center)
+    private static void DrawPlayer(DrawingContext dc, Point center, double headingDeg)
     {
         dc.DrawEllipse(GlowBrush, null, center, 26, 26);
 
-        // Карта уже повёрнута по курсу, поэтому игрок всегда смотрит вверх.
+        // Карта стоит «на север», поэтому по курсу поворачиваем саму стрелку.
+        // 0° — север (вверх), углы растут по часовой стрелке.
+        dc.PushTransform(new RotateTransform(headingDeg, center.X, center.Y));
+
         var direction = new Vector(0, -1);
         var side = new Vector(1, 0);
 
@@ -269,6 +272,7 @@ public sealed class MapView : FrameworkElement
 
         geometry.Freeze();
         dc.DrawGeometry(PlayerBrush, PlayerPen, geometry);
+        dc.Pop();
     }
 
     private static void DrawPlaceholder(DrawingContext dc, Point center)
@@ -294,12 +298,10 @@ public sealed class MapView : FrameworkElement
         dc.DrawText(hint, new Point(center.X - hint.Width / 2, center.Y + 56));
     }
 
-    private static void DrawNorth(DrawingContext dc, Point center, double side, double headingDeg)
+    private static void DrawNorth(DrawingContext dc, Point center, double side)
     {
-        // Север смещается по краю карты: при курсе на восток он уходит влево.
-        var angle = -headingDeg * Math.PI / 180.0;
-        var direction = new Vector(Math.Sin(angle), -Math.Cos(angle));
-        var position = center + direction * (side / 2 - 20);
+        // Карта north-up, поэтому «С» всегда сверху по центру.
+        var position = new Point(center.X, center.Y - side / 2 + 20);
 
         var text = new FormattedText(
             "С",

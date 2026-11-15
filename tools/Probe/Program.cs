@@ -22,6 +22,10 @@ try
 
     var settings = SessionSettings.Load(database);
 
+    // Диагностический прогон всегда идёт по демо-миру: экран разработчика
+    // не содержит миникарты Genshin.
+    settings.Mode = SessionMode.Demo;
+
     // AppSession владеет базой и освобождает её в Dispose.
     using (var session = new AppSession(database, atlasPath, settings))
     {
