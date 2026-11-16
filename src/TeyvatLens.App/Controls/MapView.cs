@@ -27,6 +27,8 @@ public sealed class MapView : FrameworkElement
     private static readonly Brush MarkerShadowBrush = FrozenBrush(Color.FromArgb(70, 20, 26, 34));
     private static readonly Brush MutedBrush = FrozenBrush(Color.FromRgb(92, 106, 120));
     private static readonly Brush AccentBrush = FrozenBrush(Color.FromRgb(31, 102, 117));
+    private static readonly Brush AccuracyBrush = FrozenBrush(Color.FromArgb(26, 111, 211, 232));
+    private static readonly Pen AccuracyPen = FrozenPen(FrozenBrush(Color.FromArgb(80, 111, 211, 232)), 1);
     private static readonly Pen HintPen = CreateHintPen();
 
     private SessionSnapshot? _snapshot;
@@ -102,6 +104,7 @@ public sealed class MapView : FrameworkElement
         if (geo is not null)
         {
             DrawRings(dc, center, radius, scale);
+            DrawAccuracy(dc, center, geo, scale);
         }
 
         if (snapshot is not null && snapshot.Hint is not null && geo is not null)
@@ -186,6 +189,16 @@ public sealed class MapView : FrameworkElement
             var pen = fraction >= 1.0 ? OuterRingPen : RingPen;
             dc.DrawEllipse(null, pen, center, r, r);
         }
+    }
+
+    /// <summary>
+    /// Круг предполагаемой погрешности: позиция после привязки не идеальна,
+    /// и с пройденным путём этот радиус честно растёт.
+    /// </summary>
+    private static void DrawAccuracy(DrawingContext dc, Point center, GeoState geo, double scale)
+    {
+        var radius = Math.Max(3.0, geo.AccuracyM * scale);
+        dc.DrawEllipse(AccuracyBrush, AccuracyPen, center, radius, radius);
     }
 
     private static void DrawMarkers(

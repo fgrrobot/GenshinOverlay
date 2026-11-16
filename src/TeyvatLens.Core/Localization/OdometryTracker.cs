@@ -15,7 +15,8 @@ public sealed record LocalizationResult(
     double DeltaZ,
     double Response,
     bool RequiresSnap,
-    string Message);
+    string Message,
+    double AccuracyM);
 
 /// <summary>
 /// Одометрия по миникарте и автомат состояний локализации.
@@ -49,6 +50,16 @@ public sealed record LocalizationResult(
 /// Ограничение MVP: миникарта считается north-up. Если она вращается вместе
 /// с камерой, корреляция увидит поворот как плохое совпадение, уверенность
 /// упадёт, и приложение честно уйдёт в Lost.
+///
+/// Что сделано для точности позиции:
+/// - смещение меньше 4 см накапливается и применяется только целиком —
+///   так не теряется медленное движение и не копится шум;
+/// - при стоянке (скорость ниже 1 м/с несколько кадров подряд) включается
+///   ZUPT: накопленный субпиксельный шум гасится, позиция замирает;
+/// - одиночный «нефизичный» скачок пропускается, а не сдвигает карту;
+///   три таких кадра подряд означают смену локации и требуют привязки;
+/// - рядом с позицией показывается оценка точности (±м), растущая с пройденным
+///   путём.
 /// </summary>
 public sealed class OdometryTracker : IDisposable
 {
@@ -56,7 +67,36 @@ public sealed class OdometryTracker : IDisposable
     // (3.5 в шкале 0..255 ≈ 0.0137).
     private const double MinTextureStd = 0.015;
     private const double MinResponse = 0.06;
-    private const double MaxStepMetersDefault = 120.0;
+
+    /// <summary>Жёсткий предел шага: больше — это уже телепорт, а не ходьба, м.</summary>
+    private const double MaxStepMetersDefault = 25.0;
+
+    /// <summary>Правдоподобная скорость перемещения для отбраковки выбросов, м/с.</summary>
+    private const double MaxSpeedMps = 60.0;
+
+    /// <summary>Нижняя граница скоростного порога, м (при очень малом dt).</summary>
+    private const double MinSpeedLimitMeters = 0.25;
+
+    /// <summary>Сколько подряд неправдоподобных кадров считаем сменой локации.</summary>
+    private const int MaxRejectedFrames = 3;
+
+    /// <summary>Скорость, ниже которой кадр считается стоянкой, м/с.</summary>
+    private const double StationarySpeedMps = 1.0;
+
+    /// <summary>Сколько кадров подряд нужно для включения ZUPT.</summary>
+    private const int StationaryFrames = 3;
+
+    /// <summary>Минимальная длительность стоянки для ZUPT, с.</summary>
+    private const double StationaryAfterSeconds = 0.12;
+
+    /// <summary>Смещение меньше этого не показываем, а копим, м.</summary>
+    private const double MinApplyMeters = 0.04;
+
+    /// <summary>Базовая оценка точности сразу после привязки, м.</summary>
+    private const double BaseAccuracyM = 0.75;
+
+    /// <summary>Прирост оценки точности на метр пройденного пути.</summary>
+    private const double AccuracyPerMeter = 0.008;
 
     /// <summary>Шаг сетки уточнения, px.</summary>
     private const double RefineStep = 0.25;
@@ -96,6 +136,20 @@ public sealed class OdometryTracker : IDisposable
     private Size _fineMaskSize;
     private double _lostTimer;
 
+    // Накопленное субпиксельное смещение: применяется, когда станет заметным.
+    private double _pendingX;
+    private double _pendingZ;
+
+    // Детектор стоянки для ZUPT.
+    private int _stillFrames;
+    private double _stillTime;
+
+    // Подряд идущие кадры с неправдоподобным смещением.
+    private int _rejectedFrames;
+
+    // Пройденный с момента привязки путь — основа оценки точности.
+    private double _travelM;
+
     public OdometryTracker(
         double pxPerMeter,
         double lostAfterSeconds = 1.5,
@@ -126,6 +180,12 @@ public sealed class OdometryTracker : IDisposable
 
     public double Confidence { get; private set; }
 
+    /// <summary>Оценка точности текущей позиции, ±м.</summary>
+    public double AccuracyM { get; private set; } = BaseAccuracyM;
+
+    /// <summary>Пройденный с момента привязки путь, м.</summary>
+    public double TravelSinceSnapM => _travelM;
+
     public TrackingStatus Status { get; private set; } = TrackingStatus.Lost;
 
     public string Message { get; private set; } = "Позиция не привязана";
@@ -147,6 +207,13 @@ public sealed class OdometryTracker : IDisposable
         _previousPatch?.Dispose();
         _previousPatch = null;
         _lostTimer = 0;
+        _pendingX = 0;
+        _pendingZ = 0;
+        _stillFrames = 0;
+        _stillTime = 0;
+        _rejectedFrames = 0;
+        _travelM = 0;
+        AccuracyM = BaseAccuracyM;
     }
 
     public void Reset()
@@ -160,6 +227,13 @@ public sealed class OdometryTracker : IDisposable
         _previousPatch?.Dispose();
         _previousPatch = null;
         _lostTimer = 0;
+        _pendingX = 0;
+        _pendingZ = 0;
+        _stillFrames = 0;
+        _stillTime = 0;
+        _rejectedFrames = 0;
+        _travelM = 0;
+        AccuracyM = BaseAccuracyM;
     }
 
     public void SetHeading(double headingDeg) =>
@@ -196,8 +270,11 @@ public sealed class OdometryTracker : IDisposable
 
         if (_previousPatch is null || _previousPatch.Size() != current.Size())
         {
-            _previousPatch?.Dispose();
-            _previousPatch = current.Clone();
+            ReplacePrevious(current);
+            _pendingX = 0;
+            _pendingZ = 0;
+            _stillFrames = 0;
+            _stillTime = 0;
             if (RequiresSnap || !HasPosition)
             {
                 Status = TrackingStatus.Lost;
@@ -214,64 +291,168 @@ public sealed class OdometryTracker : IDisposable
         }
 
         var (shiftX, shiftY, response) = Correlate(_previousPatch, current);
-        _previousPatch.Dispose();
-        _previousPatch = current.Clone();
 
         if (!double.IsFinite(response) || response < MinResponse)
         {
+            ReplacePrevious(current);
             return Decay(dt, "Недостаточно текстуры для одометрии");
         }
 
         var deltaX = -shiftX / _pxPerMeter;
         var deltaZ = -shiftY / _pxPerMeter;
+        var step = GeoMath.Distance(0, 0, deltaX, deltaZ);
 
         if (!HasPosition)
         {
+            ReplacePrevious(current);
             return Result(deltaX, deltaZ, response);
         }
 
-        var step = GeoMath.Distance(0, 0, deltaX, deltaZ);
         if (step > _maxStepMeters)
         {
-            Confidence = 0.1;
-            Status = TrackingStatus.Lost;
-            RequiresSnap = true;
-            _lostTimer = _lostAfterSeconds;
-            Message = "Обнаружен скачок позиции — нужна повторная привязка";
+            // Жёсткий порог: так выглядит телепорт или смена локации.
+            // Предыдущий кадр не обновляем — после привязки он всё равно
+            // сбрасывается, а до неё новые кадры будут так же неправдоподобны.
+            MarkLost("Обнаружен скачок позиции — нужна повторная привязка");
             return Result(0, 0, response);
         }
+
+        // Скоростной порог отсекает одиночные выбросы корреляции: настоящий
+        // игрок не перемещается на метры за один кадр. Кадр пропускаем, но
+        // предыдущий оставляем — следующий нормальный кадр сравняется с ним.
+        var speedLimit = Math.Max(MinSpeedLimitMeters, MaxSpeedMps * dt);
+        if (step > speedLimit)
+        {
+            _rejectedFrames++;
+            if (_rejectedFrames >= MaxRejectedFrames)
+            {
+                MarkLost("Смещение не подтверждается — нужна повторная привязка");
+                return Result(0, 0, response);
+            }
+
+            Confidence *= 0.97;
+            Message = "Кадр пропущен: неправдоподобный скачок";
+            return Result(0, 0, response);
+        }
+
+        _rejectedFrames = 0;
 
         if (RequiresSnap)
         {
             // Позиция была потеряна: не показываем правдоподобную, но
             // неизвестно насколько устаревшую точку.
+            ReplacePrevious(current);
             Status = TrackingStatus.Lost;
             Message = "Нужна повторная привязка к точке телепорта";
             return Result(0, 0, response);
         }
 
-        X = X!.Value + deltaX;
-        Z = Z!.Value + deltaZ;
+        // Копим смещение: на стоянке это шум, который нельзя показывать,
+        // а при медленном движении — реальный путь, который нельзя терять.
+        _pendingX += deltaX;
+        _pendingZ += deltaZ;
+
+        var speed = step / Math.Max(dt, 1e-3);
+        if (speed < StationarySpeedMps)
+        {
+            _stillFrames++;
+            _stillTime += dt;
+        }
+        else
+        {
+            _stillFrames = 0;
+            _stillTime = 0;
+        }
+
+        if (_stillFrames >= StationaryFrames && _stillTime >= StationaryAfterSeconds)
+        {
+            // ZUPT: игрок стоит. Гасим накопленный субпиксельный шум, иначе
+            // за минуты стоянки карта уползает на метры.
+            _pendingX = 0;
+            _pendingZ = 0;
+            UpdateConfidence(response);
+            _lostTimer = 0;
+            ReplacePrevious(current);
+            Message = "Игрок стоит — позиция зафиксирована";
+            return Result(0, 0, response);
+        }
+
+        var pendingStep = GeoMath.Distance(0, 0, _pendingX, _pendingZ);
+        if (pendingStep < MinApplyMeters)
+        {
+            UpdateConfidence(response);
+            _lostTimer = 0;
+            ReplacePrevious(current);
+            Message = "Одометрия работает";
+            return Result(0, 0, response);
+        }
+
+        var appliedX = _pendingX;
+        var appliedZ = _pendingZ;
+        _pendingX = 0;
+        _pendingZ = 0;
+        step = pendingStep;
+
+        X = X!.Value + appliedX;
+        Z = Z!.Value + appliedZ;
 
         if (AutoHeading && step >= MinAutoHeadingStepMeters)
         {
             // Курс = азимут последнего смещения. Сглаживаем по кратчайшей
             // дуге, иначе на переходе через 0°/360° стрелка дёргается.
-            var bearing = GeoMath.BearingDeg(X.Value - deltaX, Z.Value - deltaZ, X.Value, Z.Value);
+            var bearing = GeoMath.BearingDeg(X.Value - appliedX, Z.Value - appliedZ, X.Value, Z.Value);
             var turn = GeoMath.AngleDelta(bearing, HeadingDeg);
             HeadingDeg = GeoMath.NormalizeAngle(HeadingDeg + turn * AutoHeadingSmoothing);
         }
 
+        _travelM += step;
+        UpdateConfidence(response);
+        UpdateAccuracy();
+        _lostTimer = 0;
+        Message = "Одометрия работает";
+
+        ReplacePrevious(current);
+        return Result(appliedX, appliedZ, response);
+    }
+
+    /// <summary>Запоминает кадр как опорный для следующей корреляции.</summary>
+    private void ReplacePrevious(Mat current)
+    {
+        _previousPatch?.Dispose();
+        _previousPatch = current.Clone();
+    }
+
+    private void MarkLost(string message)
+    {
+        Confidence = 0.1;
+        Status = TrackingStatus.Lost;
+        RequiresSnap = true;
+        _lostTimer = _lostAfterSeconds;
+        _pendingX = 0;
+        _pendingZ = 0;
+        _stillFrames = 0;
+        _stillTime = 0;
+        _rejectedFrames = 0;
+        Message = message;
+    }
+
+    private void UpdateConfidence(double response)
+    {
         var target = GeoMath.Clamp((response - 0.03) / 0.35, 0.0, 1.0);
         Confidence = 0.72 * Confidence + 0.28 * target;
-        _lostTimer = 0;
         Status = Confidence > _degradedConfidence
             ? TrackingStatus.Tracking
             : TrackingStatus.Degraded;
-        Message = "Одометрия работает";
-
-        return Result(deltaX, deltaZ, response);
     }
+
+    /// <summary>
+    /// Оценка точности: базовая ошибка привязки плюс накопленная ошибка пути
+    /// (около 0,8 % пройденного расстояния) плюс штраф за низкую уверенность.
+    /// </summary>
+    private void UpdateAccuracy() =>
+        AccuracyM = BaseAccuracyM
+            + AccuracyPerMeter * _travelM
+            + 2.5 * (1.0 - GeoMath.Clamp(Confidence, 0.0, 1.0));
 
     /// <summary>Серый кадр, выравнивание контраста, float 0..1. Размер не меняется.</summary>
     private Mat Prepare(Mat patch)
@@ -566,6 +747,11 @@ public sealed class OdometryTracker : IDisposable
         }
 
         Message = message;
+        if (HasPosition)
+        {
+            UpdateAccuracy();
+        }
+
         return Result(0, 0, 0);
     }
 
@@ -580,7 +766,8 @@ public sealed class OdometryTracker : IDisposable
             deltaZ,
             response,
             RequiresSnap,
-            Message);
+            Message,
+            AccuracyM);
 
     public void Dispose()
     {

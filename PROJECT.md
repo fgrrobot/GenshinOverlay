@@ -263,6 +263,7 @@ public readonly record struct GeoState(
     int LayerId,                 // 0 = поверхность
     float HeadingDeg,
     float Confidence,            // 0..1
+    float AccuracyM,             // оценка погрешности позиции, ±м
     LocalizationSource Source,   // Odometry | Relocalized | Manual
     long TimestampMs,
     string? RegionCode);

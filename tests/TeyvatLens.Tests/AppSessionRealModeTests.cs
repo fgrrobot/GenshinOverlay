@@ -97,6 +97,77 @@ public sealed class AppSessionRealModeTests : IDisposable
         Assert.Contains(snapshot.Markers, marker => marker.Marker.Name == "Сундук");
     }
 
+    [Fact]
+    public void SnapTo_TwiceWithoutTravelKeepsScale()
+    {
+        var database = new Database(Path.Combine(_directory, "snap2.db"));
+        database.Initialize();
+        database.SeedIfEmpty();
+
+        var settings = new SessionSettings
+        {
+            Mode = SessionMode.Screen,
+            RealAtlasPath = Path.Combine(_directory, "map.png"),
+            RealPxPerMeter = 2.0,
+            ScreenPxPerMeter = 1.8
+        };
+
+        using var session = new AppSession(
+            database,
+            Path.Combine(_directory, "demo.png"),
+            settings);
+
+        var jsonPath = Path.Combine(_directory, "points2.json");
+        File.WriteAllText(
+            jsonPath,
+            """
+            { "points": [
+                { "name": "Телепорт: Монштадт", "x": 1000, "y": 400, "icon": "Teleport" },
+                { "name": "Телепорт: Ли Юэ", "x": 1400, "y": 900, "icon": "Teleport" }
+            ] }
+            """);
+
+        session.ImportRealMarkers(jsonPath);
+        var waypoints = session.GetWaypoints();
+        Assert.Equal(2, waypoints.Count);
+
+        Assert.True(session.SnapTo(waypoints[0].Id));
+        Assert.True(session.SnapTo(waypoints[1].Id));
+
+        // Без реального перемещения калибровать нечего: масштаб не меняется.
+        Assert.Equal(1.8, session.Settings.ScreenPxPerMeter, 6);
+        var snapshot = session.CurrentSnapshot();
+        Assert.Equal(waypoints[1].X, snapshot.Geo!.X, 3);
+        Assert.Equal(waypoints[1].Z, snapshot.Geo.Z, 3);
+    }
+
+    [Fact]
+    public void EstimateScreenPxPerMeter_MatchesMinimapViewRadius()
+    {
+        Assert.Equal(240 / 2.0 / 93.0, SessionSettings.EstimateScreenPxPerMeter(240), 6);
+        Assert.Equal(300 / 2.0 / 93.0, SessionSettings.EstimateScreenPxPerMeter(300), 6);
+        Assert.Equal(0.2, SessionSettings.EstimateScreenPxPerMeter(32), 6);
+    }
+
+    [Fact]
+    public void Load_MigratesOldDefaultScaleOnce()
+    {
+        var database = new Database(Path.Combine(_directory, "settings.db"));
+        database.Initialize();
+        database.SetSetting("screen_rect", "10,20,240,240");
+        database.SetSetting("screen_ppm", "2");
+        database.SetSetting("real_default_v1", "1");
+
+        var settings = SessionSettings.Load(database);
+        Assert.Equal(SessionSettings.EstimateScreenPxPerMeter(240), settings.ScreenPxPerMeter, 6);
+
+        // После миграции пользовательское значение больше не перезаписывается.
+        settings.ScreenPxPerMeter = 1.5;
+        settings.Save(database);
+        var reloaded = SessionSettings.Load(database);
+        Assert.Equal(1.5, reloaded.ScreenPxPerMeter, 6);
+    }
+
     public void Dispose()
     {
         try

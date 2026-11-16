@@ -34,6 +34,8 @@ public sealed class AppSession : IDisposable
     private double? _truthErrorM;
     private double _frameMs;
     private double _headingSmooth;
+    private double? _snapAnchorX;
+    private double? _snapAnchorZ;
     private bool _running;
     private bool _paused;
     private bool _hasStarted;
@@ -81,6 +83,15 @@ public sealed class AppSession : IDisposable
             return false;
         }
 
+        // Пересоздаём трекер, чтобы сбросить накопленный кадр и применить
+        // актуальный масштаб, но не теряем уже сделанную привязку к телепорту.
+        var keepX = _tracker.X;
+        var keepZ = _tracker.Z;
+        var keepHeading = _tracker.HeadingDeg;
+        var keepPosition = _settings.Mode == SessionMode.Screen
+            && _tracker.HasPosition
+            && !_tracker.RequiresSnap;
+
         _tracker.Dispose();
         _tracker = CreateTracker();
         _capture = _settings.Mode == SessionMode.Screen
@@ -97,10 +108,22 @@ public sealed class AppSession : IDisposable
         }
         else
         {
-            _tracker.Reset();
-            _headingSmooth = 0;
-            _status = TrackingStatus.Lost;
-            _message = "Выберите телепорт на карте и нажмите «Привязать позицию»";
+            if (keepPosition)
+            {
+                _tracker.Snap(keepX!.Value, keepZ!.Value, keepHeading);
+                _headingSmooth = keepHeading;
+                _status = TrackingStatus.Tracking;
+                _message = "Захват продолжен с текущей привязкой";
+            }
+            else
+            {
+                _tracker.Reset();
+                _headingSmooth = 0;
+                _snapAnchorX = null;
+                _snapAnchorZ = null;
+                _status = TrackingStatus.Lost;
+                _message = "Выберите телепорт на карте и нажмите «Привязать позицию»";
+            }
         }
 
         _running = true;
@@ -141,6 +164,8 @@ public sealed class AppSession : IDisposable
         _geo = null;
         _selectedMarkerId = null;
         _truthErrorM = null;
+        _snapAnchorX = null;
+        _snapAnchorZ = null;
         _status = TrackingStatus.Idle;
         _message = mode == SessionMode.Demo
             ? "Демо-мир готов к запуску"
@@ -235,6 +260,12 @@ public sealed class AppSession : IDisposable
             return false;
         }
 
+        // Перед новой привязкой уточняем масштаб миникарты: сравниваем путь,
+        // который насчитала одометрия, с расстоянием между телепортами.
+        var calibration = _settings.Mode == SessionMode.Screen
+            ? CalibrateScreenScale(marker)
+            : string.Empty;
+
         if (_settings.Mode == SessionMode.Demo)
         {
             _demo.TeleportTo(marker.X, marker.Z);
@@ -245,11 +276,15 @@ public sealed class AppSession : IDisposable
         {
             _tracker.Snap(marker.X, marker.Z);
             _headingSmooth = _tracker.HeadingDeg;
+            _snapAnchorX = marker.X;
+            _snapAnchorZ = marker.Z;
         }
 
         _status = TrackingStatus.Tracking;
         _requiresSnap = false;
-        _message = $"Позиция привязана: {marker.Name}";
+        _message = string.IsNullOrEmpty(calibration)
+            ? $"Позиция привязана: {marker.Name}"
+            : $"Позиция привязана: {marker.Name} · {calibration}";
 
         // Показываем позицию сразу после привязки, не дожидаясь первого кадра.
         _geo = new GeoState(
@@ -258,6 +293,7 @@ public sealed class AppSession : IDisposable
             _settings.Mode == SessionMode.Demo ? 0.0 : null,
             _headingSmooth,
             1.0,
+            _tracker.AccuracyM,
             "snap",
             0,
             null,
@@ -265,6 +301,44 @@ public sealed class AppSession : IDisposable
 
         RefreshMarkers();
         return true;
+    }
+
+    /// <summary>
+    /// Калибрует px/м по перемещению между двумя привязками. Возвращает
+    /// пояснение для строки состояния или пустую строку.
+    /// </summary>
+    private string CalibrateScreenScale(Marker target)
+    {
+        if (_snapAnchorX is not { } anchorX
+            || _snapAnchorZ is not { } anchorZ
+            || _tracker.X is not { } odomX
+            || _tracker.Z is not { } odomZ
+            || _tracker.RequiresSnap)
+        {
+            return string.Empty;
+        }
+
+        var calibration = ScreenScaleCalibrator.Calibrate(
+            _settings.ScreenPxPerMeter,
+            odomX - anchorX,
+            odomZ - anchorZ,
+            target.X - anchorX,
+            target.Z - anchorZ);
+
+        if (!calibration.Applied)
+        {
+            return calibration.Message;
+        }
+
+        _settings.ScreenPxPerMeter = calibration.PxPerMeter;
+        _settings.Save(_database);
+
+        // Новый масштаб применяется только новым трекером: пересчитывать
+        // накопленную позицию задним числом уже нельзя.
+        _tracker.Dispose();
+        _tracker = CreateTracker();
+
+        return calibration.Message;
     }
 
     public void SetRadius(double radiusM)
@@ -309,6 +383,8 @@ public sealed class AppSession : IDisposable
         _markers = Array.Empty<NearbyMarker>();
         _hint = null;
         _geo = null;
+        _snapAnchorX = null;
+        _snapAnchorZ = null;
     }
 
     /// <summary>Сохраняет привязку реального атласа и сбрасывает текущую сессию.</summary>
@@ -397,6 +473,8 @@ public sealed class AppSession : IDisposable
         _hint = null;
         _truthErrorM = null;
         _requiresSnap = false;
+        _snapAnchorX = null;
+        _snapAnchorZ = null;
         _status = TrackingStatus.Idle;
         _message = message;
     }
@@ -450,6 +528,7 @@ public sealed class AppSession : IDisposable
             _settings.Mode == SessionMode.Demo ? 0.0 : null,
             _headingSmooth,
             result.Confidence,
+            result.AccuracyM,
             "odometry",
             0,
             null,

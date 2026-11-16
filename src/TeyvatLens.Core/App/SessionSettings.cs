@@ -7,6 +7,14 @@ namespace TeyvatLens.Core.App;
 /// <summary>Пользовательские настройки, сохраняемые в SQLite.</summary>
 public sealed class SessionSettings
 {
+    /// <summary>
+    /// Радиус обзора миникарты в мире, м. Оценка по сообществу: радиус
+    /// компаса искателя сокровищ (~170 м) примерно на 82 % больше радиуса
+    /// миникарты. Нужен только как стартовое приближение — точный масштаб
+    /// уточняется автоматически после второй привязки к телепорту.
+    /// </summary>
+    public const double MinimapViewRadiusM = 93.0;
+
     public double RadiusM { get; set; } = 120.0;
 
     public MarkerKind? KindFilter { get; set; }
@@ -16,7 +24,12 @@ public sealed class SessionSettings
 
     public Rectangle ScreenRect { get; set; } = new(24, 24, 240, 240);
 
-    public double ScreenPxPerMeter { get; set; } = 2.0;
+    /// <summary>Сколько пикселей миникарты приходится на метр мира.</summary>
+    public double ScreenPxPerMeter { get; set; } = EstimateScreenPxPerMeter(240);
+
+    /// <summary>Оценка масштаба миникарты по размеру квадрата захвата.</summary>
+    public static double EstimateScreenPxPerMeter(int captureSizePx) =>
+        Math.Clamp(captureSizePx / 2.0 / MinimapViewRadiusM, 0.2, 20.0);
 
     /// <summary>Путь к изображению реальной карты (скриншот интерактивной карты).</summary>
     public string RealAtlasPath { get; set; } = string.Empty;
@@ -85,6 +98,19 @@ public sealed class SessionSettings
         if (double.TryParse(database.GetSetting("screen_ppm"), out var ppm) && ppm > 0)
         {
             settings.ScreenPxPerMeter = Math.Clamp(ppm, 0.2, 20.0);
+        }
+
+        // Прежний default 2.0 px/м был завышен примерно в 1,5 раза: миникарта
+        // показывает около 93 м в радиусе. Один раз пересчитываем по размеру
+        // области, если пользователь не задавал собственное значение.
+        if (!string.Equals(database.GetSetting("screen_ppm_v2"), "1", StringComparison.Ordinal))
+        {
+            if (Math.Abs(settings.ScreenPxPerMeter - 2.0) < 1e-6)
+            {
+                settings.ScreenPxPerMeter = EstimateScreenPxPerMeter(settings.ScreenRect.Width);
+            }
+
+            database.SetSetting("screen_ppm_v2", "1");
         }
 
         settings.RealAtlasPath = database.GetSetting("real_atlas_path") ?? string.Empty;

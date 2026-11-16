@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -154,9 +154,7 @@ public partial class MainWindow : Window
         RealMapCard.Visibility = screen ? Visibility.Visible : Visibility.Collapsed;
         DemoCard.Visibility = screen ? Visibility.Collapsed : Visibility.Visible;
         CaptureInfoText.Text = screen
-            ? $"Область {settings.ScreenRect.X},{settings.ScreenRect.Y} · " +
-              $"{settings.ScreenRect.Width}×{settings.ScreenRect.Height} px · " +
-              $"{settings.ScreenPxPerMeter:F1} px/м"
+            ? BuildCaptureInfo(settings)
             : "Синтетический мир 900×900 м: атлас, маршрут и объекты генерируются локально.";
 
         var profile = settings.RealProfile;
@@ -167,6 +165,11 @@ public partial class MainWindow : Window
                 : $"{Path.GetFileName(profile.AtlasPath)} · {profile.PxPerMeter:0.###} px/м · " +
                   $"точек: {_session.CountRealMarkers()}";
     }
+
+    private static string BuildCaptureInfo(SessionSettings settings) =>
+        $"Область {settings.ScreenRect.X},{settings.ScreenRect.Y} · " +
+        $"{settings.ScreenRect.Width}×{settings.ScreenRect.Height} px · " +
+        $"{settings.ScreenPxPerMeter:0.00} px/м";
 
     private void UpdateUi(SessionSnapshot snapshot)
     {
@@ -206,6 +209,16 @@ public partial class MainWindow : Window
             Compass.TargetBearingDeg = snapshot.Hint?.Target.BearingDeg;
 
             var settings = _session.Settings;
+            if (snapshot.Mode == SessionMode.Screen)
+            {
+                // Масштаб может измениться автоматической калибровкой.
+                var captureInfo = BuildCaptureInfo(settings);
+                if (CaptureInfoText.Text != captureInfo)
+                {
+                    CaptureInfoText.Text = captureInfo;
+                }
+            }
+
             if (snapshot.Mode == SessionMode.Demo)
             {
                 Map.Atlas = _atlas;
@@ -284,7 +297,7 @@ public partial class MainWindow : Window
             return "Позиция не определена";
         }
 
-        var text = $"X {geo.X:F0} · Z {geo.Z:F0} · уверенность {geo.Confidence:P0}";
+        var text = $"X {geo.X:F0} · Z {geo.Z:F0} · ±{geo.AccuracyM:F1} м · {geo.Confidence:P0}";
         if (snapshot.TruthErrorM is { } error)
         {
             text += $" · ошибка {error:F1} м";

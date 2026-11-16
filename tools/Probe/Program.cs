@@ -50,7 +50,8 @@ try
             {
                 Console.WriteLine(
                     $"step {step,3}: status={last.Status,-8} pos=({last.Geo?.X:F1},{last.Geo?.Z:F1}) " +
-                    $"err={last.TruthErrorM:F2} m markers={last.Markers.Count} " +
+                    $"err={last.TruthErrorM:F2} m acc=±{last.Geo?.AccuracyM:F1} m " +
+                    $"markers={last.Markers.Count} " +
                     $"hint={(last.Hint?.DirectionRu ?? "-")} frame={last.FrameMs:F2} ms");
             }
         }

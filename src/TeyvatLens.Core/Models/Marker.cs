@@ -30,6 +30,7 @@ public sealed record GeoState(
     double? Y,
     double HeadingDeg,
     double Confidence,
+    double AccuracyM,
     string Source,
     int LayerId,
     string? RegionCode,
