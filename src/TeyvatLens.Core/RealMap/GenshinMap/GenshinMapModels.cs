@@ -84,3 +84,28 @@ public sealed record GenshinMapRegion(
         x >= Left + marginM && x <= Right - marginM &&
         z >= Top + marginM && z <= Bottom - marginM;
 }
+
+/// <summary>
+/// Уменьшенный атлас всей карты Тейвата (отрицательный зум).
+///
+/// Нужен для абсолютной привязки, когда текущий фрагмент карты не совпадает
+/// с экраном (например, после телепорта в другой регион). Один пиксель
+/// такого атласа покрывает <c>2^|zoom|</c> метров мира. По умолчанию берётся
+/// зум −2 (4 м/пиксель): на нём масштаб снимка карты отличается от атласа
+/// всего в 2–4 раза, и ORB находит точки надёжно.
+/// </summary>
+public sealed record GenshinGlobalAtlas(
+    string Path,
+    int Zoom,
+    double PxPerMeter,
+    int Width,
+    int Height)
+{
+    /// <summary>Зум по умолчанию для грубой привязки.</summary>
+    public const int DefaultZoom = -2;
+
+    public MapProfile Profile => new(Path, PxPerMeter, 0, 0);
+
+    /// <summary>Сколько метров мира приходится на пиксель атласа.</summary>
+    public double MetersPerPixel => 1.0 / PxPerMeter;
+}

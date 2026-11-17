@@ -242,6 +242,74 @@ public sealed class GenshinMapTests
     }
 
     [Fact]
+    public void ComputeGlobalGrid_UsesNegativeZoomDivisor()
+    {
+        var (tilesX, tilesY, width, height) = GenshinTileComposer.ComputeGlobalGrid(Info, -3);
+
+        Assert.Equal(2, tilesX);
+        Assert.Equal(2, tilesY);
+        Assert.Equal(512, width);
+        Assert.Equal(512, height);
+    }
+
+    [Fact]
+    public void ComputeGlobalGrid_MatchesRealMapDimensions()
+    {
+        var info = new GenshinMapInfo(
+            MapId: 2,
+            Name: "Тейват",
+            Version: "v1",
+            OriginX: 24207,
+            OriginY: 16411,
+            TotalWidth: 36864,
+            TotalHeight: 32768,
+            MinZoom: -4,
+            MaxZoom: 0);
+
+        var (tilesX, tilesY, width, height) = GenshinTileComposer.ComputeGlobalGrid(info, -3);
+
+        Assert.Equal(18, tilesX);
+        Assert.Equal(16, tilesY);
+        Assert.Equal(4608, width);
+        Assert.Equal(4096, height);
+    }
+
+    [Fact]
+    public void ComputeGlobalGrid_DefaultZoomIsFourMetersPerPixel()
+    {
+        var info = new GenshinMapInfo(
+            MapId: 2,
+            Name: "Тейват",
+            Version: "v1",
+            OriginX: 24207,
+            OriginY: 16411,
+            TotalWidth: 36864,
+            TotalHeight: 32768,
+            MinZoom: -4,
+            MaxZoom: 0);
+
+        var (tilesX, tilesY, width, height) =
+            GenshinTileComposer.ComputeGlobalGrid(info, GenshinGlobalAtlas.DefaultZoom);
+
+        Assert.Equal(-2, GenshinGlobalAtlas.DefaultZoom);
+        Assert.Equal(36, tilesX);
+        Assert.Equal(32, tilesY);
+        Assert.Equal(9216, width);
+        Assert.Equal(8192, height);
+
+        var atlas = new GenshinGlobalAtlas("global.png", -2, 0.25, width, height);
+        Assert.Equal(4.0, atlas.MetersPerPixel, 6);
+        Assert.Equal(0.25, atlas.Profile.PxPerMeter, 6);
+    }
+
+    [Fact]
+    public void ComputeGlobalGrid_RejectsNonNegativeZoom()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => GenshinTileComposer.ComputeGlobalGrid(Info, 0));
+    }
+
+    [Fact]
     public void MapRegion_ContainsRespectsMargin()
     {
         var region = new GenshinMapRegion("map.png", 1000, 2000, 2560);

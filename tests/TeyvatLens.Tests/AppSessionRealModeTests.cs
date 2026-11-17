@@ -142,6 +142,53 @@ public sealed class AppSessionRealModeTests : IDisposable
     }
 
     [Fact]
+    public void SnapToWorld_SetsAbsolutePositionAndAccuracy()
+    {
+        var database = new Database(Path.Combine(_directory, "world.db"));
+        database.Initialize();
+        database.SeedIfEmpty();
+
+        var settings = new SessionSettings
+        {
+            Mode = SessionMode.Screen,
+            RealAtlasPath = Path.Combine(_directory, "map.png"),
+            RealPxPerMeter = 1.0
+        };
+
+        using var session = new AppSession(
+            database,
+            Path.Combine(_directory, "demo.png"),
+            settings);
+
+        Assert.True(session.SnapToWorld(1234, 5678, 3.5));
+
+        var snapshot = session.CurrentSnapshot();
+        Assert.NotNull(snapshot.Geo);
+        Assert.Equal(1234, snapshot.Geo!.X, 3);
+        Assert.Equal(5678, snapshot.Geo.Z, 3);
+        Assert.Equal(3.5, snapshot.Geo.AccuracyM, 3);
+        Assert.Equal("map", snapshot.Geo.Source);
+        Assert.Equal(TrackingStatus.Tracking, snapshot.Status);
+        Assert.False(snapshot.RequiresSnap);
+    }
+
+    [Fact]
+    public void SnapToWorld_RejectsNonFiniteCoordinates()
+    {
+        var database = new Database(Path.Combine(_directory, "world-bad.db"));
+        database.Initialize();
+        database.SeedIfEmpty();
+
+        using var session = new AppSession(
+            database,
+            Path.Combine(_directory, "demo.png"),
+            new SessionSettings { Mode = SessionMode.Screen });
+
+        Assert.False(session.SnapToWorld(double.NaN, 10, 2));
+        Assert.Null(session.CurrentSnapshot().Geo);
+    }
+
+    [Fact]
     public void EstimateScreenPxPerMeter_MatchesMinimapViewRadius()
     {
         Assert.Equal(240 / 2.0 / 93.0, SessionSettings.EstimateScreenPxPerMeter(240), 6);

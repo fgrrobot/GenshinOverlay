@@ -195,7 +195,7 @@ public sealed class OdometryTracker : IDisposable
 
     public bool HasPosition => X is not null && Z is not null;
 
-    public void Snap(double x, double z, double headingDeg = 0.0)
+    public void Snap(double x, double z, double headingDeg = 0.0, double? accuracyM = null)
     {
         X = x;
         Z = z;
@@ -213,7 +213,9 @@ public sealed class OdometryTracker : IDisposable
         _stillTime = 0;
         _rejectedFrames = 0;
         _travelM = 0;
-        AccuracyM = BaseAccuracyM;
+        AccuracyM = accuracyM is { } value
+            ? Math.Clamp(value, 0.1, 1000.0)
+            : BaseAccuracyM;
     }
 
     public void Reset()

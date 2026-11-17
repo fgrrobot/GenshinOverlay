@@ -13,8 +13,11 @@ using System.Windows.Threading;
 using Microsoft.Win32;
 using TeyvatLens.Core;
 using TeyvatLens.Core.App;
+using TeyvatLens.Core.Localization;
 using TeyvatLens.Core.Models;
+using TeyvatLens.Core.RealMap;
 using TeyvatLens.Core.RealMap.GenshinMap;
+using TeyvatLens.Core.Vision;
 using CoreStatus = TeyvatLens.Core.Models.StatusText;
 
 namespace TeyvatLens.App;
@@ -527,6 +530,8 @@ public partial class MainWindow : Window
         AutoMapButton.IsEnabled = !busy;
         LoadMapButton.IsEnabled = !busy;
         ImportPointsButton.IsEnabled = !busy;
+        MapAnchorButton.IsEnabled = !busy;
+        SnapButton.IsEnabled = !busy;
 
         if (message is not null)
         {
@@ -669,6 +674,154 @@ public partial class MainWindow : Window
         {
             RealMapInfoText.Text = $"Карта не догрузилась: {exception.Message}";
         }
+    }
+
+    /// <summary>
+    /// Абсолютная привязка по снимку карты (M). Сворачивает окно, снимает
+    /// экран игры, ищет снимок на текущем атласе, а при неудаче — на грубом
+    /// глобальном атласе, затем уточняет позицию по фрагменту нулевого зума.
+    /// </summary>
+    private async void OnMapAnchor(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _session.Mode != SessionMode.Screen)
+        {
+            return;
+        }
+
+        SetBusy(true, "Привязываю по карте…");
+        var previousState = WindowState;
+        IProgress<string> progress = new Progress<string>(text => RealMapInfoText.Text = text);
+
+        try
+        {
+            WindowState = WindowState.Minimized;
+            await Task.Delay(550);
+
+            using var query = MapScreenCapture.CaptureGame();
+            WindowState = previousState;
+            Activate();
+
+            if (MapScreenCapture.IsMostlyBlank(query))
+            {
+                MessageBox.Show(
+                    "Снимок карты получился пустым. Запустите игру в оконном режиме без рамки " +
+                    "и откройте карту (M).",
+                    "Teyvat Lens",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            var profile = _session.Settings.RealProfile;
+            progress.Report("Строю признаки атласа…");
+            var result = await Task.Run(() => _genshin.Locate(query, profile.AtlasPath, profile));
+            var usedGlobal = false;
+
+            if (!result.Success)
+            {
+                progress.Report("Ищу регион на глобальном атласе (первый раз скачается ~15 МБ)…");
+                var global = await _genshin.EnsureGlobalAtlasAsync(
+                    zoom: GenshinGlobalAtlas.DefaultZoom,
+                    progress,
+                    CancellationToken.None);
+
+                progress.Report("Строю признаки глобального атласа…");
+                result = await Task.Run(() => _genshin.Locate(query, global.Path, global.Profile));
+                usedGlobal = result.Success;
+            }
+
+            if (!result.Success)
+            {
+                MessageBox.Show(
+                    $"Не удалось определить позицию по карте.\n{result.Message}",
+                    "Teyvat Lens",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            // Грубая привязка даёт единицы метров. Догружаем фрагмент
+            // нулевого зума и уточняем позицию уже по нему.
+            var detail = await EnsureDetailRegionAsync(result.WorldX, result.WorldZ, progress);
+            if (detail is not null)
+            {
+                progress.Report("Уточняю позицию по детальному фрагменту…");
+                var refined = await Task.Run(
+                    () => _genshin.Locate(query, detail.AtlasPath, detail));
+                if (refined.Success)
+                {
+                    result = refined;
+                    usedGlobal = false;
+                }
+            }
+
+            _session.SnapToWorld(result.WorldX, result.WorldZ, result.AccuracyM);
+            UpdateUi(_session.CurrentSnapshot());
+
+            MessageBox.Show(
+                $"Позиция: X {result.WorldX:F0}, Z {result.WorldZ:F0} · ±{result.AccuracyM:F1} м\n" +
+                result.Message +
+                (usedGlobal ? "\nИсточник: глобальный атлас." : string.Empty),
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                $"Ошибка привязки по карте:\n{exception.Message}",
+                "Teyvat Lens",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            WindowState = previousState;
+            Activate();
+            SetBusy(false, null);
+            SyncModeUi();
+            UpdateUi(_session.CurrentSnapshot());
+        }
+    }
+
+    /// <summary>
+    /// Гарантирует, что вокруг найденной точки есть фрагмент нулевого зума.
+    /// Если точка уже внутри текущего атласа — возвращает его без скачивания.
+    /// </summary>
+    private async Task<MapProfile?> EnsureDetailRegionAsync(
+        double worldX,
+        double worldZ,
+        IProgress<string> progress)
+    {
+        var current = _session.Settings.RealProfile;
+        if (current.IsValid)
+        {
+            var updated = await _genshin.EnsureRegionAsync(
+                current,
+                _realAtlas?.PixelWidth ?? GenshinMapService.DefaultRegionPx,
+                worldX,
+                worldZ,
+                progress,
+                CancellationToken.None);
+
+            if (updated is null)
+            {
+                return current;
+            }
+
+            _session.UpdateRealAtlas(updated);
+            LoadRealAtlas();
+            return updated;
+        }
+
+        var profile = await _genshin.LoadRegionAsync(
+            worldX,
+            worldZ,
+            progress,
+            CancellationToken.None);
+        _session.UpdateRealAtlas(profile);
+        LoadRealAtlas();
+        return profile;
     }
 
     private void OnRadiusChanged(object sender, RoutedPropertyChangedEventArgs<double> e)

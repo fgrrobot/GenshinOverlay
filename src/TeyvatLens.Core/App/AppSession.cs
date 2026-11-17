@@ -304,6 +304,44 @@ public sealed class AppSession : IDisposable
     }
 
     /// <summary>
+    /// Привязывает позицию по абсолютному источнику — снимку карты (M).
+    /// В отличие от телепорта координата уже известна, поэтому остаётся
+    /// выставить её в трекере и показать честную оценку точности.
+    /// </summary>
+    public bool SnapToWorld(double x, double z, double accuracyM, string source = "map")
+    {
+        if (double.IsNaN(x) || double.IsNaN(z) || double.IsInfinity(x) || double.IsInfinity(z))
+        {
+            _message = "Карта дала некорректные координаты";
+            return false;
+        }
+
+        var accuracy = Math.Clamp(accuracyM, 0.5, 200.0);
+        _tracker.Snap(x, z, _tracker.HeadingDeg, accuracy);
+        _headingSmooth = _tracker.HeadingDeg;
+        _snapAnchorX = x;
+        _snapAnchorZ = z;
+        _status = TrackingStatus.Tracking;
+        _requiresSnap = false;
+        _message = $"Позиция привязана по карте: X {x:F0}, Z {z:F0} · ±{accuracy:F1} м";
+
+        _geo = new GeoState(
+            x,
+            z,
+            _settings.Mode == SessionMode.Demo ? 0.0 : null,
+            _headingSmooth,
+            1.0,
+            _tracker.AccuracyM,
+            source,
+            0,
+            null,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0);
+
+        RefreshMarkers();
+        return true;
+    }
+
+    /// <summary>
     /// Калибрует px/м по перемещению между двумя привязками. Возвращает
     /// пояснение для строки состояния или пустую строку.
     /// </summary>

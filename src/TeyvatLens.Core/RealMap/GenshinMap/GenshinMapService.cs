@@ -1,4 +1,6 @@
 using System.Net.Http;
+using OpenCvSharp;
+using TeyvatLens.Core.Localization;
 
 namespace TeyvatLens.Core.RealMap.GenshinMap;
 
@@ -26,8 +28,13 @@ public sealed class GenshinMapService : IDisposable
 
     private readonly GenshinMapClient _client;
     private readonly GenshinTileComposer _composer;
+    private readonly object _indexLock = new();
 
     private GenshinMapInfo? _info;
+    private AtlasRelocalizer? _relocalizer;
+    private AtlasIndex? _atlasIndex;
+    private string? _atlasIndexPath;
+    private DateTime _atlasIndexWriteTime;
 
     public GenshinMapService(string cacheDir, HttpClient? http = null)
     {
@@ -65,6 +72,86 @@ public sealed class GenshinMapService : IDisposable
 
         var profile = new MapProfile(region.Path, PixelsPerMeter, region.Left, region.Top);
         return new GenshinLoadResult(profile, markers, info, region);
+    }
+
+    /// <summary>
+    /// Скачивает фрагмент нулевого зума вокруг произвольной точки. Нужен,
+    /// когда атлас ещё не загружен, но позиция уже известна (например,
+    /// после грубой привязки по глобальному атласу).
+    /// </summary>
+    public async Task<MapProfile> LoadRegionAsync(
+        double worldX,
+        double worldZ,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var info = _info ??= await _client.GetInfoAsync(progress, cancellationToken);
+        var region = await _composer.ComposeAsync(
+            info,
+            worldX,
+            worldZ,
+            DefaultRegionPx,
+            zoom: 0,
+            progress,
+            cancellationToken);
+
+        return new MapProfile(region.Path, PixelsPerMeter, region.Left, region.Top);
+    }
+
+    /// <summary>
+    /// Собирает (или берёт из кэша) уменьшенный атлас всей карты. Для зума −2
+    /// это 9216×8192 px (4 м на пиксель): достаточно, чтобы грубо найти регион,
+    /// но в разы меньше полной карты 36864×32768.
+    /// </summary>
+    public async Task<GenshinGlobalAtlas> EnsureGlobalAtlasAsync(
+        int zoom,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var info = _info ??= await _client.GetInfoAsync(progress, cancellationToken);
+        return await _composer.ComposeGlobalAsync(info, zoom, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// Абсолютная привязка снимка карты к атласу. ORB-индекс атласа
+    /// кэшируется, поэтому повторные нажатия кнопки не пересчитывают
+    /// признаки заново.
+    /// </summary>
+    public RelocalizationResult Locate(Mat query, string atlasPath, MapProfile profile)
+    {
+        if (!profile.IsValid || string.IsNullOrWhiteSpace(atlasPath) || !File.Exists(atlasPath))
+        {
+            return RelocalizationResult.Fail("Атлас не загружен.");
+        }
+
+        lock (_indexLock)
+        {
+            var writeTime = File.GetLastWriteTimeUtc(atlasPath);
+            if (_atlasIndex is null
+                || !string.Equals(_atlasIndexPath, atlasPath, StringComparison.OrdinalIgnoreCase)
+                || _atlasIndexWriteTime != writeTime)
+            {
+                using var atlas = Cv2.ImRead(atlasPath, ImreadModes.Grayscale);
+                if (atlas.Empty())
+                {
+                    return RelocalizationResult.Fail("Не удалось прочитать атлас.");
+                }
+
+                _relocalizer ??= new AtlasRelocalizer();
+                _atlasIndex?.Dispose();
+                _atlasIndex = _relocalizer.BuildIndex(atlas);
+                _atlasIndexPath = atlasPath;
+                _atlasIndexWriteTime = writeTime;
+            }
+
+            var index = _atlasIndex;
+            if (index is null)
+            {
+                return RelocalizationResult.Fail("Индекс атласа не построен.");
+            }
+
+            return (_relocalizer ??= new AtlasRelocalizer()).Locate(query, index, profile);
+        }
     }
 
     /// <summary>
@@ -136,5 +223,10 @@ public sealed class GenshinMapService : IDisposable
         return (xs[xs.Length / 2], zs[zs.Length / 2]);
     }
 
-    public void Dispose() => _client.Dispose();
+    public void Dispose()
+    {
+        _atlasIndex?.Dispose();
+        _relocalizer?.Dispose();
+        _client.Dispose();
+    }
 }

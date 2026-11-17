@@ -41,18 +41,29 @@ public sealed class ScreenCapture
     public double PxPerMeter { get; }
 
     /// <summary>Снимает область экрана и возвращает BGR-кадр. Mat нужно освободить.</summary>
-    public Mat Grab()
+    public Mat Grab() => CaptureArea(Rectangle);
+
+    /// <summary>
+    /// Снимает произвольный прямоугольник экрана. В отличие от конструктора,
+    /// не требует квадратной формы: используется для снимка карты (M).
+    /// </summary>
+    public static Mat CaptureArea(Rectangle rectangle)
     {
+        if (rectangle.Width < 1 || rectangle.Height < 1)
+        {
+            throw new ArgumentException("Область захвата пуста.", nameof(rectangle));
+        }
+
         using var bitmap = new Bitmap(
-            Rectangle.Width,
-            Rectangle.Height,
+            rectangle.Width,
+            rectangle.Height,
             PixelFormat.Format24bppRgb);
 
         using (var graphics = Graphics.FromImage(bitmap))
         {
             graphics.CopyFromScreen(
-                Rectangle.Left,
-                Rectangle.Top,
+                rectangle.Left,
+                rectangle.Top,
                 0,
                 0,
                 bitmap.Size,
@@ -62,7 +73,7 @@ public sealed class ScreenCapture
         return BitmapToMat(bitmap);
     }
 
-    private static Mat BitmapToMat(Bitmap bitmap)
+    internal static Mat BitmapToMat(Bitmap bitmap)
     {
         var mat = new Mat(bitmap.Height, bitmap.Width, MatType.CV_8UC3);
         var bounds = new Rectangle(0, 0, bitmap.Width, bitmap.Height);

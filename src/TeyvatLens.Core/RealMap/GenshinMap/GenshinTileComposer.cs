@@ -1,3 +1,4 @@
+using System.Net.Http;
 using OpenCvSharp;
 
 namespace TeyvatLens.Core.RealMap.GenshinMap;
@@ -39,6 +40,96 @@ public sealed class GenshinTileComposer
         var leftTile = (int)Math.Floor((centerX - sizePx / 2.0) / GenshinMapInfo.TileSize);
         var topTile = (int)Math.Floor((centerZ - sizePx / 2.0) / GenshinMapInfo.TileSize);
         return (leftTile, topTile, tiles);
+    }
+
+    /// <summary>
+    /// Сетка уменьшенного атласа всей карты для отрицательного зума.
+    /// Например, для карты 36864×32768 и зума −3 получается 18×16 тайлов,
+    /// то есть изображение 4608×4096 px.
+    /// </summary>
+    public static (int TilesX, int TilesY, int Width, int Height) ComputeGlobalGrid(
+        GenshinMapInfo info,
+        int zoom)
+    {
+        if (zoom >= 0 || zoom < info.MinZoom)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(zoom),
+                "Глобальный атлас строится только для отрицательных зумов карты.");
+        }
+
+        var divisor = 1 << Math.Abs(zoom);
+        var width = info.TotalWidth / divisor;
+        var height = info.TotalHeight / divisor;
+        var tilesX = (int)Math.Ceiling(width / (double)GenshinMapInfo.TileSize);
+        var tilesY = (int)Math.Ceiling(height / (double)GenshinMapInfo.TileSize);
+        return (tilesX, tilesY, tilesX * GenshinMapInfo.TileSize, tilesY * GenshinMapInfo.TileSize);
+    }
+
+    /// <summary>
+    /// Собирает и кэширует атлас всей карты в уменьшенном масштабе.
+    /// Первый запуск скачивает все тайлы (для зума −3 — 288 штук), повторный
+    /// читает готовый PNG из кэша.
+    /// </summary>
+    public async Task<GenshinGlobalAtlas> ComposeGlobalAsync(
+        GenshinMapInfo info,
+        int zoom,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var (tilesX, tilesY, width, height) = ComputeGlobalGrid(info, zoom);
+        var directory = Path.Combine(_cacheDir, "global");
+        Directory.CreateDirectory(directory);
+
+        var path = Path.Combine(directory, $"global_z{zoom}.png");
+        var pxPerMeter = 1.0 / (1 << Math.Abs(zoom));
+
+        if (File.Exists(path))
+        {
+            progress?.Report("Глобальный атлас уже в кэше.");
+            return new GenshinGlobalAtlas(path, zoom, pxPerMeter, width, height);
+        }
+
+        progress?.Report($"Скачиваю глобальный атлас: {tilesX}×{tilesY} тайлов…");
+
+        using var canvas = new Mat(
+            height,
+            width,
+            MatType.CV_8UC1,
+            new Scalar(0x18));
+
+        var done = 0;
+        var total = tilesX * tilesY;
+
+        for (var row = 0; row < tilesY; row++)
+        {
+            for (var column = 0; column < tilesX; column++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var bytes = await GetTileOrEmptyAsync(
+                    info,
+                    column,
+                    row,
+                    zoom,
+                    cancellationToken);
+
+                DrawTileGray(canvas, bytes, column * GenshinMapInfo.TileSize, row * GenshinMapInfo.TileSize);
+
+                done++;
+                if (done % 32 == 0 || done == total)
+                {
+                    progress?.Report($"Скачиваю глобальный атлас: {done}/{total} тайлов…");
+                }
+            }
+        }
+
+        if (!Cv2.ImWrite(path, canvas))
+        {
+            throw new InvalidOperationException("Не удалось сохранить глобальный атлас.");
+        }
+
+        return new GenshinGlobalAtlas(path, zoom, pxPerMeter, width, height);
     }
 
     public async Task<GenshinMapRegion> ComposeAsync(
@@ -86,7 +177,7 @@ public sealed class GenshinTileComposer
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var bytes = await _client.GetTileAsync(
+                var bytes = await GetTileOrEmptyAsync(
                     info,
                     leftTile + column,
                     topTile + row,
@@ -111,8 +202,86 @@ public sealed class GenshinTileComposer
         return new GenshinMapRegion(path, left, top, sizePx);
     }
 
+    /// <summary>
+    /// Скачивает тайл, но не роняет всю сборку, если отдельного тайла нет
+    /// (край карты, дыра в пирамиде). Такой тайл остаётся фоном.
+    /// </summary>
+    private async Task<byte[]> GetTileOrEmptyAsync(
+        GenshinMapInfo info,
+        int tileX,
+        int tileY,
+        int zoom,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _client.GetTileAsync(info, tileX, tileY, zoom, cancellationToken);
+        }
+        catch (HttpRequestException)
+        {
+            return Array.Empty<byte>();
+        }
+    }
+
+    /// <summary>
+    /// Копирует тайл в серый атлас. Глобальный атлас нужен только для
+    /// сопоставления, поэтому хранится одноканальным: 9216×8192 в цвете —
+    /// это 226 МБ, а в сером — 75 МБ.
+    /// </summary>
+    private static void DrawTileGray(Mat canvas, byte[] bytes, int x, int y)
+    {
+        if (bytes.Length == 0)
+        {
+            return;
+        }
+
+        using var decoded = Cv2.ImDecode(bytes, ImreadModes.Unchanged);
+        if (decoded.Empty())
+        {
+            return;
+        }
+
+        var width = Math.Min(decoded.Width, canvas.Width - x);
+        var height = Math.Min(decoded.Height, canvas.Height - y);
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        using var tile = new Mat(decoded, new Rect(0, 0, width, height));
+        using var roi = new Mat(canvas, new Rect(x, y, width, height));
+
+        switch (tile.Channels())
+        {
+            case 1:
+                tile.CopyTo(roi);
+                break;
+            case 3:
+            {
+                using var gray = new Mat();
+                Cv2.CvtColor(tile, gray, ColorConversionCodes.BGR2GRAY);
+                gray.CopyTo(roi);
+                break;
+            }
+            case 4:
+            {
+                using var gray = new Mat();
+                using var alpha = new Mat();
+                Cv2.CvtColor(tile, gray, ColorConversionCodes.BGRA2GRAY);
+                Cv2.ExtractChannel(tile, alpha, 3);
+                gray.CopyTo(roi, alpha);
+                break;
+            }
+        }
+    }
+
     private static void DrawTile(Mat canvas, byte[] bytes, int x, int y)
     {
+        if (bytes.Length == 0)
+        {
+            return;
+        }
+
         using var decoded = Cv2.ImDecode(bytes, ImreadModes.Unchanged);
         if (decoded.Empty())
         {
