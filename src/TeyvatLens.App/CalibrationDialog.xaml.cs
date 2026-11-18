@@ -10,13 +10,15 @@ public partial class CalibrationDialog : Window
 {
     private bool _syncing;
     private bool _ppmEdited;
+    private readonly double _detectedDiameterPx;
 
-    public CalibrationDialog(Rectangle rectangle, double pxPerMeter)
+    public CalibrationDialog(Rectangle rectangle, double pxPerMeter, double detectedDiameterPx = 0)
     {
         InitializeComponent();
 
         Rectangle = rectangle;
         PxPerMeter = pxPerMeter;
+        _detectedDiameterPx = detectedDiameterPx;
 
         _syncing = true;
         XBox.Text = rectangle.X.ToString(CultureInfo.CurrentCulture);
@@ -24,13 +26,20 @@ public partial class CalibrationDialog : Window
         SizeBox.Text = rectangle.Width.ToString(CultureInfo.CurrentCulture);
         PpmBox.Text = pxPerMeter.ToString("0.##", CultureInfo.CurrentCulture);
         _syncing = false;
+        UpdateHint();
     }
 
     public Rectangle Rectangle { get; private set; }
 
     public double PxPerMeter { get; private set; }
 
-    /// <summary>Пока масштаб не правили вручную, подставляем оценку по размеру.</summary>
+    /// <summary>Пользователь правил масштаб вручную — автоподстройка его не тронет.</summary>
+    public bool PpmEdited => _ppmEdited;
+
+    /// <summary>
+    /// Пока масштаб не правили вручную, подставляем оценку: по найденному
+    /// кругу миникарты, а если круг не найден — по размеру квадрата.
+    /// </summary>
     private void OnSizeChanged(object sender, TextChangedEventArgs e)
     {
         if (_syncing || _ppmEdited)
@@ -44,10 +53,9 @@ public partial class CalibrationDialog : Window
         }
 
         _syncing = true;
-        PpmBox.Text = SessionSettings
-            .EstimateScreenPxPerMeter(size)
-            .ToString("0.##", CultureInfo.CurrentCulture);
+        PpmBox.Text = EstimatePxPerMeter(size).ToString("0.##", CultureInfo.CurrentCulture);
         _syncing = false;
+        UpdateHint();
     }
 
     private void OnPpmChanged(object sender, TextChangedEventArgs e)
@@ -55,7 +63,44 @@ public partial class CalibrationDialog : Window
         if (!_syncing)
         {
             _ppmEdited = true;
+            UpdateHint();
         }
+    }
+
+    private double EstimatePxPerMeter(int size) =>
+        _detectedDiameterPx > 0
+            ? SessionSettings.EstimateFromDiameter(_detectedDiameterPx)
+            : SessionSettings.EstimateScreenPxPerMeter(size);
+
+    private void UpdateHint()
+    {
+        if (HintText is null)
+        {
+            return;
+        }
+
+        if (_ppmEdited)
+        {
+            HintText.Text =
+                "Масштаб задан вручную: автоподстройка по найденному кругу его не изменит. " +
+                "Уточнить масштаб по пройденному пути всё равно можно второй привязкой.";
+            return;
+        }
+
+        if (_detectedDiameterPx > 0)
+        {
+            var ppm = SessionSettings.EstimateFromDiameter(_detectedDiameterPx);
+            HintText.Text =
+                $"Найден круг миникарты: {_detectedDiameterPx:0} px в поперечнике → " +
+                $"{ppm:0.00} px/м. Масштаб подставлен автоматически; точное значение " +
+                "уточняется после второй привязки к телепорту или снимку карты.";
+            return;
+        }
+
+        HintText.Text =
+            "Круг миникарты не найден, поэтому масштаб оценён по размеру квадрата: " +
+            "93 м в поперечнике. Обведите круг целиком, с небольшими полями, " +
+            "или задайте масштаб вручную.";
     }
 
     private void OnSave(object sender, RoutedEventArgs e)

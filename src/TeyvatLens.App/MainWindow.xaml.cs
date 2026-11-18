@@ -48,7 +48,9 @@ public partial class MainWindow : Window
 
         _timer = new DispatcherTimer(DispatcherPriority.Render)
         {
-            Interval = TimeSpan.FromMilliseconds(66)
+            // 30 кадров в секунду: задержка метки между обновлениями — не
+            // больше 33 мс, а на 15 fps она доходила до 66 мс.
+            Interval = TimeSpan.FromMilliseconds(33)
         };
         _timer.Tick += OnTick;
 
@@ -172,7 +174,10 @@ public partial class MainWindow : Window
     private static string BuildCaptureInfo(SessionSettings settings) =>
         $"Область {settings.ScreenRect.X},{settings.ScreenRect.Y} · " +
         $"{settings.ScreenRect.Width}×{settings.ScreenRect.Height} px · " +
-        $"{settings.ScreenPxPerMeter:0.00} px/м";
+        $"{settings.ScreenPxPerMeter:0.00} px/м" +
+        (settings.ScreenCircleDiameterPx > 0
+            ? $" · круг {settings.ScreenCircleDiameterPx:0} px"
+            : string.Empty);
 
     private void UpdateUi(SessionSnapshot snapshot)
     {
@@ -438,7 +443,8 @@ public partial class MainWindow : Window
     {
         var dialog = new CalibrationDialog(
             _session.Settings.ScreenRect,
-            _session.Settings.ScreenPxPerMeter)
+            _session.Settings.ScreenPxPerMeter,
+            _session.Settings.ScreenCircleDiameterPx)
         {
             Owner = this
         };
@@ -450,7 +456,7 @@ public partial class MainWindow : Window
 
         try
         {
-            _session.ConfigureScreen(dialog.Rectangle, dialog.PxPerMeter);
+            _session.ConfigureScreen(dialog.Rectangle, dialog.PxPerMeter, dialog.PpmEdited);
             _timer.Stop();
             SyncModeUi();
             UpdateUi(_session.CurrentSnapshot());
@@ -758,16 +764,14 @@ public partial class MainWindow : Window
             _session.SnapToWorld(result.WorldX, result.WorldZ, result.AccuracyM);
             UpdateUi(_session.CurrentSnapshot());
 
-            // Если масштаб всё ещё равен стартовой оценке, честно просим
+            // Пока масштаб не уточнён по пройденному пути, честно просим
             // пройтись и привязаться ещё раз: только вторая точка даёт
             // калибровку по реальному пути.
-            var estimated = SessionSettings.EstimateScreenPxPerMeter(
-                _session.Settings.ScreenRect.Width);
-            var scaleHint = Math.Abs(_session.Settings.ScreenPxPerMeter - estimated) < 1e-3
-                ? "\n\nМасштаб миникарты пока оценочный. Пройдите 30+ м по прямой " +
-                  "и нажмите «Привязать по карте (M)» ещё раз — приложение " +
-                  "уточнит масштаб по пройденному пути."
-                : string.Empty;
+            var scaleHint = _session.Settings.ScreenScaleCalibrated
+                ? string.Empty
+                : "\n\nМасштаб миникарты взят по найденному кругу. Пройдите 30+ м " +
+                  "по прямой и нажмите «Привязать по карте (M)» ещё раз — " +
+                  "приложение уточнит масштаб по пройденному пути.";
 
             MessageBox.Show(
                 $"Позиция: X {result.WorldX:F0}, Z {result.WorldZ:F0} · ±{result.AccuracyM:F1} м\n" +

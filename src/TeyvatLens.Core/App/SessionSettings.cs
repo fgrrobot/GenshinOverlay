@@ -31,9 +31,36 @@ public sealed class SessionSettings
     /// <summary>Сколько пикселей миникарты приходится на метр мира.</summary>
     public double ScreenPxPerMeter { get; set; } = EstimateScreenPxPerMeter(240);
 
-    /// <summary>Оценка масштаба миникарты по размеру квадрата захвата.</summary>
+    /// <summary>
+    /// Масштаб задан вручную в диалоге калибровки. Автоподстройка по
+    /// найденному кругу миникарты его не трогает.
+    /// </summary>
+    public bool ScreenScaleManual { get; set; }
+
+    /// <summary>
+    /// Масштаб уточнён по пройденному пути между двумя привязками. Это самый
+    /// точный источник, поэтому он тоже защищён от автоподстройки.
+    /// </summary>
+    public bool ScreenScaleCalibrated { get; set; }
+
+    /// <summary>
+    /// Поперечник найденного круга миникарты, px. Ноль — круг ещё не найден.
+    /// </summary>
+    public double ScreenCircleDiameterPx { get; set; }
+
+    /// <summary>
+    /// Грубая оценка масштаба по размеру квадрата захвата. Годится, только
+    /// если круг миникарты не найден и квадрат обведён вплотную.
+    /// </summary>
     public static double EstimateScreenPxPerMeter(int captureSizePx) =>
         Math.Clamp(captureSizePx / MinimapViewDiameterM, 0.2, 20.0);
+
+    /// <summary>
+    /// Оценка масштаба по диаметру найденного круга миникарты. Это точнее
+    /// размера квадрата: в захват часто попадают поля и элементы интерфейса.
+    /// </summary>
+    public static double EstimateFromDiameter(double diameterPx) =>
+        Math.Clamp(diameterPx / MinimapViewDiameterM, 0.2, 20.0);
 
     /// <summary>
     /// Старая (ошибочная) оценка: 93 м принимались за радиус, поэтому масштаб
@@ -144,6 +171,35 @@ public sealed class SessionSettings
             database.SetSetting("screen_ppm_v3", "1");
         }
 
+        settings.ScreenScaleManual =
+            string.Equals(database.GetSetting("screen_scale_manual"), "1", StringComparison.Ordinal);
+        settings.ScreenScaleCalibrated =
+            string.Equals(database.GetSetting("screen_scale_calibrated"), "1", StringComparison.Ordinal);
+
+        if (double.TryParse(database.GetSetting("screen_circle_diameter"), out var diameter)
+            && diameter > 0)
+        {
+            settings.ScreenCircleDiameterPx = Math.Clamp(diameter, 16.0, 4000.0);
+        }
+
+        // Один раз решаем, трогать ли уже сохранённый масштаб. Если он не
+        // совпадает ни с одной из оценок, значит пользователь задал его сам
+        // (или откалибровал по пути) — автоподстройка по кругу не должна его
+        // перезаписывать.
+        if (!string.Equals(database.GetSetting("screen_scale_flags_v1"), "1", StringComparison.Ordinal))
+        {
+            if (!settings.ScreenScaleManual && !settings.ScreenScaleCalibrated)
+            {
+                var estimate = EstimateScreenPxPerMeter(settings.ScreenRect.Width);
+                if (Math.Abs(settings.ScreenPxPerMeter - estimate) > 0.05)
+                {
+                    settings.ScreenScaleManual = true;
+                }
+            }
+
+            database.SetSetting("screen_scale_flags_v1", "1");
+        }
+
         settings.RealAtlasPath = database.GetSetting("real_atlas_path") ?? string.Empty;
         if (double.TryParse(database.GetSetting("real_ppm"), out var realPpm) && realPpm > 0)
         {
@@ -172,6 +228,11 @@ public sealed class SessionSettings
             "screen_rect",
             $"{ScreenRect.X},{ScreenRect.Y},{ScreenRect.Width},{ScreenRect.Height}");
         database.SetSetting("screen_ppm", ScreenPxPerMeter.ToString("0.##"));
+        database.SetSetting("screen_scale_manual", ScreenScaleManual ? "1" : "0");
+        database.SetSetting("screen_scale_calibrated", ScreenScaleCalibrated ? "1" : "0");
+        database.SetSetting(
+            "screen_circle_diameter",
+            ScreenCircleDiameterPx.ToString("0.#"));
         database.SetSetting("real_atlas_path", RealAtlasPath);
         database.SetSetting("real_ppm", RealPxPerMeter.ToString("0.####"));
         database.SetSetting("real_origin_x", RealOriginXMeters.ToString("0.##"));

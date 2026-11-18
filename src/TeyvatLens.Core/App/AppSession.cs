@@ -28,6 +28,7 @@ public sealed class AppSession : IDisposable
     private IReadOnlyList<NearbyMarker> _markers = Array.Empty<NearbyMarker>();
     private NavigationHint? _hint;
     private GeoState? _geo;
+    private MinimapCircle _circle = MinimapCircle.None;
     private TrackingStatus _status = TrackingStatus.Idle;
     private string _message = "Нажмите «Старт»";
     private long? _selectedMarkerId;
@@ -93,10 +94,18 @@ public sealed class AppSession : IDisposable
             && !_tracker.RequiresSnap;
 
         _tracker.Dispose();
-        _tracker = CreateTracker();
+        _circle = MinimapCircle.None;
         _capture = _settings.Mode == SessionMode.Screen
             ? new ScreenCapture(_settings.ScreenRect, _settings.ScreenPxPerMeter)
             : null;
+
+        // Ищем круг миникарты до создания трекера: диаметр круга задаёт
+        // масштаб, а его центр — положение «слепого» пятна под стрелку.
+        var circleNote = _settings.Mode == SessionMode.Screen
+            ? DetectMinimap(applyScale: true)
+            : string.Empty;
+
+        _tracker = CreateTracker();
 
         if (_settings.Mode == SessionMode.Demo)
         {
@@ -113,7 +122,7 @@ public sealed class AppSession : IDisposable
                 _tracker.Snap(keepX!.Value, keepZ!.Value, keepHeading);
                 _headingSmooth = keepHeading;
                 _status = TrackingStatus.Tracking;
-                _message = "Захват продолжен с текущей привязкой";
+                _message = "Захват продолжен с текущей привязкой" + circleNote;
             }
             else
             {
@@ -122,7 +131,7 @@ public sealed class AppSession : IDisposable
                 _snapAnchorX = null;
                 _snapAnchorZ = null;
                 _status = TrackingStatus.Lost;
-                _message = "Выберите телепорт на карте и нажмите «Привязать позицию»";
+                _message = "Выберите телепорт на карте и нажмите «Привязать позицию»" + circleNote;
             }
         }
 
@@ -158,6 +167,7 @@ public sealed class AppSession : IDisposable
         _paused = false;
         _hasStarted = false;
         _capture = null;
+        _circle = MinimapCircle.None;
         _tracker.Reset();
         _markers = Array.Empty<NearbyMarker>();
         _hint = null;
@@ -201,7 +211,9 @@ public sealed class AppSession : IDisposable
             }
 
             using (frame)
-            using (var normalized = MinimapNormalizer.Normalize(frame))
+            using (var normalized = _settings.Mode == SessionMode.Screen && _circle.Found
+                ? MinimapNormalizer.Normalize(frame, _circle)
+                : MinimapNormalizer.Normalize(frame))
             {
                 Apply(_tracker.Update(normalized, dt));
             }
@@ -388,6 +400,8 @@ public sealed class AppSession : IDisposable
         }
 
         _settings.ScreenPxPerMeter = calibration.PxPerMeter;
+        _settings.ScreenScaleCalibrated = true;
+        _settings.ScreenScaleManual = false;
         _settings.Save(_database);
 
         _tracker.Dispose();
@@ -410,7 +424,7 @@ public sealed class AppSession : IDisposable
         RefreshMarkers();
     }
 
-    public void ConfigureScreen(Rectangle rectangle, double pxPerMeter)
+    public void ConfigureScreen(Rectangle rectangle, double pxPerMeter, bool manualScale = false)
     {
         if (rectangle.Width < 32 || rectangle.Height < 32)
         {
@@ -424,17 +438,29 @@ public sealed class AppSession : IDisposable
 
         _settings.ScreenRect = rectangle;
         _settings.ScreenPxPerMeter = pxPerMeter;
+        _settings.ScreenScaleManual = manualScale;
+        if (manualScale)
+        {
+            _settings.ScreenScaleCalibrated = false;
+        }
+
         _settings.Save(_database);
 
         _running = false;
         _paused = false;
         _hasStarted = false;
         _capture = null;
+        _circle = MinimapCircle.None;
+
+        // Сразу проверяем новую область: если круг найден, показываем его
+        // диаметр и уточнённый масштаб, не дожидаясь запуска.
+        var note = DetectMinimap(applyScale: !manualScale);
+
         _tracker.Dispose();
         _tracker = CreateTracker();
         _tracker.Reset();
         _status = TrackingStatus.Idle;
-        _message = "Настройки захвата сохранены";
+        _message = "Настройки захвата сохранены" + note;
         _markers = Array.Empty<NearbyMarker>();
         _hint = null;
         _geo = null;
@@ -521,6 +547,7 @@ public sealed class AppSession : IDisposable
         _paused = false;
         _hasStarted = false;
         _capture = null;
+        _circle = MinimapCircle.None;
         _tracker.Reset();
         _geo = null;
         _selectedMarkerId = null;
@@ -547,6 +574,51 @@ public sealed class AppSession : IDisposable
         _database.ResetProgress();
         _message = "Прогресс сброшен";
         RefreshMarkers();
+    }
+
+    /// <summary>
+    /// Ищет круг миникарты в текущей области захвата, запоминает его и — если
+    /// масштаб не задан вручную и не откалиброван по пути — пересчитывает
+    /// px/м по диаметру круга. Возвращает пояснение для строки состояния.
+    /// </summary>
+    private string DetectMinimap(bool applyScale)
+    {
+        try
+        {
+            using var frame = ScreenCapture.CaptureArea(_settings.ScreenRect);
+            var circle = MinimapCircleDetector.Detect(frame);
+            if (!circle.Found)
+            {
+                _circle = MinimapCircle.None;
+                return " · круг миникарты не найден, масштаб по размеру области";
+            }
+
+            _circle = circle;
+            _settings.ScreenCircleDiameterPx = circle.DiameterPx;
+
+            if (applyScale && !_settings.ScreenScaleManual && !_settings.ScreenScaleCalibrated)
+            {
+                _settings.ScreenPxPerMeter =
+                    SessionSettings.EstimateFromDiameter(circle.DiameterPx);
+            }
+
+            _settings.Save(_database);
+
+            var note = $" · круг {circle.DiameterPx:F0} px, {_settings.ScreenPxPerMeter:F2} px/м";
+            if (circle.TouchesBorder(_settings.ScreenRect.Width, _settings.ScreenRect.Height))
+            {
+                note += " (круг обрезан краем области — расширьте её)";
+            }
+
+            return note;
+        }
+        catch (Exception)
+        {
+            // Захват может не работать, пока игра свёрнута. Это не повод
+            // ломать запуск: трекер сообщит об ошибке на первом кадре.
+            _circle = MinimapCircle.None;
+            return string.Empty;
+        }
     }
 
     private OdometryTracker CreateTracker()

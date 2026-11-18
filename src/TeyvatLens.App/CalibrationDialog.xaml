@@ -48,11 +48,12 @@
                 </StackPanel>
             </Grid>
 
-            <TextBlock Style="{StaticResource MutedText}"
+            <TextBlock x:Name="HintText"
+                       Style="{StaticResource MutedText}"
                        Margin="0,14,0,0"
                        TextWrapping="Wrap"
                        FontSize="11.5"
-                       Text="Масштаб подставляется по размеру квадрата: миникарта показывает около 93 м в поперечнике (240 px ≈ 2,6 px/м). Точное значение уточняется автоматически после второй привязки к другому телепорту или снимку карты."/>
+                       Text="Масштаб подставляется по найденному кругу миникарты: около 93 м в поперечнике. Точное значение уточняется автоматически после второй привязки к другому телепорту или снимку карты."/>
 
             <TextBlock x:Name="ErrorText"
                        Foreground="{StaticResource DangerBrush}"
