@@ -23,6 +23,18 @@ public sealed class ScreenScaleCalibratorTests
     }
 
     [Fact]
+    public void Calibrate_DoublesScaleWhenMarkerMovesHalfSpeed()
+    {
+        // Игрок прошёл 50 м, а одометрия насчитала только 25 м: масштаб был
+        // завышен вдвое, из-за чего метка двигалась вдвое медленнее.
+        var result = ScreenScaleCalibrator.Calibrate(2.58, 25, 0, 50, 0);
+
+        Assert.True(result.Applied);
+        Assert.Equal(1.29, result.PxPerMeter, 6);
+        Assert.Equal(0.5, result.Ratio, 6);
+    }
+
+    [Fact]
     public void Calibrate_KeepsScaleWhenPathMatches()
     {
         var result = ScreenScaleCalibrator.Calibrate(2.0, 80, 0, 80, 0);

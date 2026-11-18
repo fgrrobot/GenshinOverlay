@@ -29,10 +29,15 @@ public static class ScreenScaleCalibrator
     /// <summary>Минимальное перемещение между телепортами, м.</summary>
     public const double MinAtlasDistanceM = 20.0;
 
-    /// <summary>Допустимое отношение измеренного и картографического пути.</summary>
-    public const double MinRatio = 0.5;
+    /// <summary>
+    /// Допустимое отношение измеренного и картографического пути. Диапазон
+    /// широкий намеренно: до первой калибровки стартовая оценка масштаба может
+    /// ошибаться в 2–3 раза, и её всё равно нужно исправить. Направление при
+    /// этом проверяется отдельно, поэтому «чужую» привязку это не пропустит.
+    /// </summary>
+    public const double MinRatio = 0.3;
 
-    public const double MaxRatio = 2.0;
+    public const double MaxRatio = 3.0;
 
     /// <summary>Допустимое расхождение направлений, градусы.</summary>
     public const double MaxBearingErrorDeg = 45.0;

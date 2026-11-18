@@ -189,11 +189,13 @@ public sealed class AppSessionRealModeTests : IDisposable
     }
 
     [Fact]
-    public void EstimateScreenPxPerMeter_MatchesMinimapViewRadius()
+    public void EstimateScreenPxPerMeter_UsesMinimapViewDiameter()
     {
-        Assert.Equal(240 / 2.0 / 93.0, SessionSettings.EstimateScreenPxPerMeter(240), 6);
-        Assert.Equal(300 / 2.0 / 93.0, SessionSettings.EstimateScreenPxPerMeter(300), 6);
-        Assert.Equal(0.2, SessionSettings.EstimateScreenPxPerMeter(32), 6);
+        // 93 м — поперечник обзора миникарты, поэтому на него делится весь
+        // размер квадрата захвата, а не половина.
+        Assert.Equal(240 / 93.0, SessionSettings.EstimateScreenPxPerMeter(240), 6);
+        Assert.Equal(300 / 93.0, SessionSettings.EstimateScreenPxPerMeter(300), 6);
+        Assert.Equal(0.2, SessionSettings.EstimateScreenPxPerMeter(16), 6);
     }
 
     [Fact]
@@ -213,6 +215,45 @@ public sealed class AppSessionRealModeTests : IDisposable
         settings.Save(database);
         var reloaded = SessionSettings.Load(database);
         Assert.Equal(1.5, reloaded.ScreenPxPerMeter, 6);
+    }
+
+    [Fact]
+    public void Load_DoublesScaleStoredWithOldRadiusEstimate()
+    {
+        var database = new Database(Path.Combine(_directory, "settings-v3.db"));
+        database.Initialize();
+        database.SetSetting("screen_rect", "10,20,240,240");
+        database.SetSetting("screen_ppm", SessionSettings.LegacyScreenPxPerMeter(240).ToString("0.####"));
+        database.SetSetting("screen_ppm_v2", "1");
+        database.SetSetting("real_default_v1", "1");
+
+        var settings = SessionSettings.Load(database);
+
+        // Старое значение считалось как 240 / 2 / 93; после миграции — 240 / 93.
+        Assert.Equal(SessionSettings.EstimateScreenPxPerMeter(240), settings.ScreenPxPerMeter, 3);
+        Assert.Equal(2.0 * SessionSettings.LegacyScreenPxPerMeter(240), settings.ScreenPxPerMeter, 3);
+
+        // Новое значение сохранено сразу, поэтому повторная загрузка (даже
+        // без Save) не откатывает масштаб обратно.
+        var reloaded = SessionSettings.Load(database);
+        Assert.Equal(2.58, reloaded.ScreenPxPerMeter, 2);
+    }
+
+    [Fact]
+    public void Load_KeepsCustomScaleThatDiffersFromOldEstimate()
+    {
+        var database = new Database(Path.Combine(_directory, "settings-v3-custom.db"));
+        database.Initialize();
+        database.SetSetting("screen_rect", "10,20,240,240");
+        database.SetSetting(
+            "screen_ppm",
+            3.7.ToString(System.Globalization.CultureInfo.CurrentCulture));
+        database.SetSetting("screen_ppm_v2", "1");
+        database.SetSetting("real_default_v1", "1");
+
+        var settings = SessionSettings.Load(database);
+
+        Assert.Equal(3.7, settings.ScreenPxPerMeter, 3);
     }
 
     public void Dispose()

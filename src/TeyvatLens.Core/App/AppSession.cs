@@ -260,10 +260,14 @@ public sealed class AppSession : IDisposable
             return false;
         }
 
+        // Курс переживает пересоздание трекера при калибровке: привязка к
+        // телепорту задаёт позицию, но не направление взгляда.
+        var heading = _tracker.HeadingDeg;
+
         // Перед новой привязкой уточняем масштаб миникарты: сравниваем путь,
         // который насчитала одометрия, с расстоянием между телепортами.
         var calibration = _settings.Mode == SessionMode.Screen
-            ? CalibrateScreenScale(marker)
+            ? CalibrateScreenScale(marker.X, marker.Z)
             : string.Empty;
 
         if (_settings.Mode == SessionMode.Demo)
@@ -274,8 +278,8 @@ public sealed class AppSession : IDisposable
         }
         else
         {
-            _tracker.Snap(marker.X, marker.Z);
-            _headingSmooth = _tracker.HeadingDeg;
+            _tracker.Snap(marker.X, marker.Z, heading);
+            _headingSmooth = heading;
             _snapAnchorX = marker.X;
             _snapAnchorZ = marker.Z;
         }
@@ -316,14 +320,27 @@ public sealed class AppSession : IDisposable
             return false;
         }
 
+        // Курс переживает пересоздание трекера при калибровке масштаба:
+        // снимок карты не сообщает направление, поэтому сохраняем текущее.
+        var heading = _tracker.HeadingDeg;
+
+        // Вторая и последующие привязки по карте уточняют масштаб миникарты
+        // так же, как привязки к телепортам: сравниваем пройденный одометрией
+        // путь с реальным расстоянием между точками.
+        var calibration = _settings.Mode == SessionMode.Screen
+            ? CalibrateScreenScale(x, z)
+            : string.Empty;
+
         var accuracy = Math.Clamp(accuracyM, 0.5, 200.0);
-        _tracker.Snap(x, z, _tracker.HeadingDeg, accuracy);
-        _headingSmooth = _tracker.HeadingDeg;
+        _tracker.Snap(x, z, heading, accuracy);
+        _headingSmooth = heading;
         _snapAnchorX = x;
         _snapAnchorZ = z;
         _status = TrackingStatus.Tracking;
         _requiresSnap = false;
-        _message = $"Позиция привязана по карте: X {x:F0}, Z {z:F0} · ±{accuracy:F1} м";
+        _message = string.IsNullOrEmpty(calibration)
+            ? $"Позиция привязана по карте: X {x:F0}, Z {z:F0} · ±{accuracy:F1} м"
+            : $"Позиция привязана по карте: X {x:F0}, Z {z:F0} · ±{accuracy:F1} м · {calibration}";
 
         _geo = new GeoState(
             x,
@@ -342,10 +359,12 @@ public sealed class AppSession : IDisposable
     }
 
     /// <summary>
-    /// Калибрует px/м по перемещению между двумя привязками. Возвращает
-    /// пояснение для строки состояния или пустую строку.
+    /// Калибрует px/м по перемещению между двумя привязками (телепортами или
+    /// снимками карты). Возвращает пояснение для строки состояния или пустую
+    /// строку. Новый масштаб применяется новым трекером: пересчитывать
+    /// накопленную позицию задним числом уже нельзя.
     /// </summary>
-    private string CalibrateScreenScale(Marker target)
+    private string CalibrateScreenScale(double worldX, double worldZ)
     {
         if (_snapAnchorX is not { } anchorX
             || _snapAnchorZ is not { } anchorZ
@@ -360,8 +379,8 @@ public sealed class AppSession : IDisposable
             _settings.ScreenPxPerMeter,
             odomX - anchorX,
             odomZ - anchorZ,
-            target.X - anchorX,
-            target.Z - anchorZ);
+            worldX - anchorX,
+            worldZ - anchorZ);
 
         if (!calibration.Applied)
         {
@@ -371,8 +390,6 @@ public sealed class AppSession : IDisposable
         _settings.ScreenPxPerMeter = calibration.PxPerMeter;
         _settings.Save(_database);
 
-        // Новый масштаб применяется только новым трекером: пересчитывать
-        // накопленную позицию задним числом уже нельзя.
         _tracker.Dispose();
         _tracker = CreateTracker();
 

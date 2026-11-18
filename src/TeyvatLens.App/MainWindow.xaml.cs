@@ -758,10 +758,22 @@ public partial class MainWindow : Window
             _session.SnapToWorld(result.WorldX, result.WorldZ, result.AccuracyM);
             UpdateUi(_session.CurrentSnapshot());
 
+            // Если масштаб всё ещё равен стартовой оценке, честно просим
+            // пройтись и привязаться ещё раз: только вторая точка даёт
+            // калибровку по реальному пути.
+            var estimated = SessionSettings.EstimateScreenPxPerMeter(
+                _session.Settings.ScreenRect.Width);
+            var scaleHint = Math.Abs(_session.Settings.ScreenPxPerMeter - estimated) < 1e-3
+                ? "\n\nМасштаб миникарты пока оценочный. Пройдите 30+ м по прямой " +
+                  "и нажмите «Привязать по карте (M)» ещё раз — приложение " +
+                  "уточнит масштаб по пройденному пути."
+                : string.Empty;
+
             MessageBox.Show(
                 $"Позиция: X {result.WorldX:F0}, Z {result.WorldZ:F0} · ±{result.AccuracyM:F1} м\n" +
                 result.Message +
-                (usedGlobal ? "\nИсточник: глобальный атлас." : string.Empty),
+                (usedGlobal ? "\nИсточник: глобальный атлас." : string.Empty) +
+                scaleHint,
                 "Teyvat Lens",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);

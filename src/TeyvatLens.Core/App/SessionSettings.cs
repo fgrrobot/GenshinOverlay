@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Globalization;
 using TeyvatLens.Core.Models;
 using TeyvatLens.Core.RealMap;
 
@@ -8,12 +9,15 @@ namespace TeyvatLens.Core.App;
 public sealed class SessionSettings
 {
     /// <summary>
-    /// Радиус обзора миникарты в мире, м. Оценка по сообществу: радиус
-    /// компаса искателя сокровищ (~170 м) примерно на 82 % больше радиуса
-    /// миникарты. Нужен только как стартовое приближение — точный масштаб
-    /// уточняется автоматически после второй привязки к телепорту.
+    /// Поперечник обзора миникарты в мире, м. Квадрат захвата обводится вокруг
+    /// миникарты, поэтому его ширина примерно равна этому поперечнику.
+    ///
+    /// Раньше здесь хранился радиус 93 м, и метка в приложении двигалась ровно
+    /// в 2 раза медленнее игрока: на самом деле ~93 м — это диаметр обзора.
+    /// Значение остаётся лишь стартовым: после второй привязки масштаб
+    /// уточняется автоматически по пройденному пути.
     /// </summary>
-    public const double MinimapViewRadiusM = 93.0;
+    public const double MinimapViewDiameterM = 93.0;
 
     public double RadiusM { get; set; } = 120.0;
 
@@ -29,7 +33,14 @@ public sealed class SessionSettings
 
     /// <summary>Оценка масштаба миникарты по размеру квадрата захвата.</summary>
     public static double EstimateScreenPxPerMeter(int captureSizePx) =>
-        Math.Clamp(captureSizePx / 2.0 / MinimapViewRadiusM, 0.2, 20.0);
+        Math.Clamp(captureSizePx / MinimapViewDiameterM, 0.2, 20.0);
+
+    /// <summary>
+    /// Старая (ошибочная) оценка: 93 м принимались за радиус, поэтому масштаб
+    /// получался вдвое меньше нужного. Нужна только для миграции настроек.
+    /// </summary>
+    public static double LegacyScreenPxPerMeter(int captureSizePx) =>
+        Math.Clamp(captureSizePx / 2.0 / MinimapViewDiameterM, 0.2, 20.0);
 
     /// <summary>Путь к изображению реальной карты (скриншот интерактивной карты).</summary>
     public string RealAtlasPath { get; set; } = string.Empty;
@@ -100,9 +111,8 @@ public sealed class SessionSettings
             settings.ScreenPxPerMeter = Math.Clamp(ppm, 0.2, 20.0);
         }
 
-        // Прежний default 2.0 px/м был завышен примерно в 1,5 раза: миникарта
-        // показывает около 93 м в радиусе. Один раз пересчитываем по размеру
-        // области, если пользователь не задавал собственное значение.
+        // Прежний default 2.0 px/м был неточен. Один раз пересчитываем по
+        // размеру области, если пользователь не задавал собственное значение.
         if (!string.Equals(database.GetSetting("screen_ppm_v2"), "1", StringComparison.Ordinal))
         {
             if (Math.Abs(settings.ScreenPxPerMeter - 2.0) < 1e-6)
@@ -111,6 +121,27 @@ public sealed class SessionSettings
             }
 
             database.SetSetting("screen_ppm_v2", "1");
+        }
+
+        // v3: раньше 93 м считались радиусом обзора миникарты, из-за чего метка
+        // двигалась вдвое медленнее игрока. Пересчитываем сохранённое значение,
+        // если оно совпадает со старой оценкой; своё значение пользователя
+        // (например, из диалога калибровки) не трогаем.
+        if (!string.Equals(database.GetSetting("screen_ppm_v3"), "1", StringComparison.Ordinal))
+        {
+            var legacy = LegacyScreenPxPerMeter(settings.ScreenRect.Width);
+            if (Math.Abs(settings.ScreenPxPerMeter - legacy) < 1e-3)
+            {
+                settings.ScreenPxPerMeter = EstimateScreenPxPerMeter(settings.ScreenRect.Width);
+
+                // Сохраняем сразу: если приложение закроется до следующего
+                // Save, флаг миграции уже не даст пересчитать значение снова.
+                database.SetSetting(
+                    "screen_ppm",
+                    settings.ScreenPxPerMeter.ToString("0.##", CultureInfo.CurrentCulture));
+            }
+
+            database.SetSetting("screen_ppm_v3", "1");
         }
 
         settings.RealAtlasPath = database.GetSetting("real_atlas_path") ?? string.Empty;
