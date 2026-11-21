@@ -116,6 +116,15 @@ public sealed class OdometryTracker : IDisposable
     /// <summary>Поле, отбрасываемое при уточнении, доля от меньшей стороны.</summary>
     private const double RoiMarginFraction = 0.18;
 
+    /// <summary>
+    /// Радиус плавно погашенного центра в окне корреляции (стрелка игрока),
+    /// доля от меньшей стороны. Должен накрывать стрелку целиком.
+    /// </summary>
+    private const double CorrelationHoleFraction = 0.12;
+
+    /// <summary>Ширина плавного перехода вокруг центрального пятна, доля от меньшей стороны.</summary>
+    private const double CorrelationFeatherFraction = 0.04;
+
     /// <summary>Минимальный шаг, при котором курс оценивается по направлению движения, м.</summary>
     private const double MinAutoHeadingStepMeters = 0.2;
 
@@ -130,8 +139,8 @@ public sealed class OdometryTracker : IDisposable
     private readonly CLAHE _clahe;
 
     private Mat? _previousPatch;
-    private Mat? _window;
-    private Size _windowSize;
+    private Mat? _correlationWindow;
+    private Size _correlationWindowSize;
     private Mat? _fineMask;
     private Size _fineMaskSize;
     private double _lostTimer;
@@ -479,7 +488,7 @@ public sealed class OdometryTracker : IDisposable
     /// </summary>
     private (double X, double Y, double Response) Correlate(Mat previous, Mat current)
     {
-        var window = EnsureWindow(current.Size());
+        var window = EnsureCorrelationWindow(current.Size());
 
         using var a = new Mat();
         using var b = new Mat();
@@ -585,10 +594,17 @@ public sealed class OdometryTracker : IDisposable
         for (var index = 0; index < points; index++)
         {
             var offset = (index - RefineHalf) * RefineStep;
-            using var warped = alongX
-                ? Warp(current, fixedX + offset, fixedY)
-                : Warp(current, fixedX, fixedY + offset);
-            var value = MaskedSsd(reference, warped, weights);
+            var dx = alongX ? fixedX + offset : fixedX;
+            var dy = alongX ? fixedY : fixedY + offset;
+
+            // Кадры сдвигаются навстречу друг другу на половину смещения.
+            // Если двигать только текущий кадр, интерполяция размывает его
+            // тем сильнее, чем больше сдвиг, и SSD систематически выбирает
+            // меньшее смещение. На 30 fps сдвиг за кадр — доли пикселя, и
+            // такая ошибка съедала почти всё движение: метка замирала.
+            using var warpedCurrent = Warp(current, dx / 2.0, dy / 2.0);
+            using var warpedReference = Warp(reference, -dx / 2.0, -dy / 2.0);
+            var value = MaskedSsd(warpedReference, warpedCurrent, weights);
             values[index] = value;
             if (value < bestValue)
             {
@@ -708,18 +724,49 @@ public sealed class OdometryTracker : IDisposable
         return double.IsFinite(offset) ? Math.Clamp(offset, -0.5, 0.5) : 0.0;
     }
 
-    private Mat EnsureWindow(Size size)
+    /// <summary>
+    /// Окно фазовой корреляции: Ханн плюс плавно погашенный центр. Стрелка
+    /// игрока не двигается вместе с картой и без гашения тянет пик к нулю.
+    /// Гасим именно плавно: резкая маска сама создаёт статичную границу,
+    /// за которую цепляется корреляция, и оценка снова съезжает к нулю.
+    /// </summary>
+    private Mat EnsureCorrelationWindow(Size size)
     {
-        if (_window is not null && _windowSize == size)
+        if (_correlationWindow is not null && _correlationWindowSize == size)
         {
-            return _window;
+            return _correlationWindow;
         }
 
-        _window?.Dispose();
-        _window = new Mat();
-        Cv2.CreateHanningWindow(_window, size, MatType.CV_32F);
-        _windowSize = size;
-        return _window;
+        _correlationWindow?.Dispose();
+        _correlationWindow = new Mat();
+        Cv2.CreateHanningWindow(_correlationWindow, size, MatType.CV_32F);
+
+        var side = Math.Min(size.Width, size.Height);
+        var centerX = size.Width / 2.0;
+        var centerY = size.Height / 2.0;
+        var hole = side * CorrelationHoleFraction;
+        var feather = Math.Max(2.0, side * CorrelationFeatherFraction);
+
+        for (var y = 0; y < size.Height; y++)
+        {
+            for (var x = 0; x < size.Width; x++)
+            {
+                var dx = x - centerX + 0.5;
+                var dy = y - centerY + 0.5;
+                var distance = Math.Sqrt(dx * dx + dy * dy);
+                var weight = SmoothStep((distance - hole) / feather);
+                _correlationWindow.Set(y, x, _correlationWindow.At<float>(y, x) * (float)weight);
+            }
+        }
+
+        _correlationWindowSize = size;
+        return _correlationWindow;
+    }
+
+    private static double SmoothStep(double value)
+    {
+        var t = GeoMath.Clamp(value, 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
     }
 
     private LocalizationResult Decay(double dt, string message)
@@ -775,8 +822,8 @@ public sealed class OdometryTracker : IDisposable
     {
         _previousPatch?.Dispose();
         _previousPatch = null;
-        _window?.Dispose();
-        _window = null;
+        _correlationWindow?.Dispose();
+        _correlationWindow = null;
         _fineMask?.Dispose();
         _fineMask = null;
         _clahe.Dispose();

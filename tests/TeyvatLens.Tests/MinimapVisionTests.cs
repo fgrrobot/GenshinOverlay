@@ -54,7 +54,7 @@ public sealed class MinimapVisionTests
     }
 
     [Fact]
-    public void Normalize_CropsToCircleAndMasksArrowHole()
+    public void Normalize_CropsToCircleAndKeepsCenterVisible()
     {
         var circle = new MinimapCircle(true, 150, 92, 86, 20);
         using var frame = new Mat(240, 240, MatType.CV_8UC1, Scalar.Black);
@@ -65,11 +65,14 @@ public sealed class MinimapVisionTests
 
         using var normalized = MinimapNormalizer.Normalize(frame, circle);
 
-        Assert.Equal(174, normalized.Width);
-        Assert.Equal(174, normalized.Height);
+        Assert.Equal(172, normalized.Width);
+        Assert.Equal(172, normalized.Height);
 
         var center = normalized.Width / 2;
-        Assert.Equal(0, normalized.At<byte>(center, center)); // слепое пятно
+        // Центр не вырезается: стрелку игрока закрывает маска трекера уже
+        // после выравнивания контраста. Чёрное пятно здесь дало бы статичное
+        // кольцо от CLAHE и заморозило оценку сдвига.
+        Assert.Equal(255, normalized.At<byte>(center, center));
         Assert.Equal(255, normalized.At<byte>(center, center + 50)); // карта
         Assert.Equal(0, normalized.At<byte>(2, 2)); // вне круга
 
@@ -114,14 +117,16 @@ public sealed class MinimapVisionTests
         using var first = WithArrow(texture, 150, 100);
         using var second = WithArrow(moved, 150, 100);
 
-        using var normalized = MinimapNormalizer.Normalize(first, circle);
-        Assert.Equal(0, normalized.At<byte>(normalized.Height / 2, normalized.Width / 2));
-
-        // С маской круга стрелка не меняет оценку вообще.
+        // С маской круга стрелка не меняет оценку вообще: её закрывает маска
+        // трекера, которая накладывается после выравнивания контраста.
         var withArrow = MeasureDelta(first, second, circle, useCircle: true);
         var withoutArrow = MeasureDelta(texture, moved, circle, useCircle: true);
-        Assert.Equal(withoutArrow.X, withArrow.X, 6);
-        Assert.Equal(withoutArrow.Z, withArrow.Z, 6);
+        Assert.True(
+            Math.Abs(withArrow.X - withoutArrow.X) < 0.01,
+            $"Стрелка сдвинула оценку по X: {withArrow.X:F4} и {withoutArrow.X:F4}");
+        Assert.True(
+            Math.Abs(withArrow.Z - withoutArrow.Z) < 0.01,
+            $"Стрелка сдвинула оценку по Z: {withArrow.Z:F4} и {withoutArrow.Z:F4}");
 
         // Без обрезки по кругу та же стрелка на оценку влияет.
         var plainWith = MeasureDelta(first, second, circle, useCircle: false);
@@ -130,6 +135,22 @@ public sealed class MinimapVisionTests
             Math.Abs(plainWith.X - plainWithout.X) > 1e-3,
             $"Стрелка не повлияла на оценку без маски круга: " +
             $"{plainWith.X:F4} и {plainWithout.X:F4}");
+    }
+
+    [Fact]
+    public void CircleNormalization_KeepsSubpixelShift()
+    {
+        // На 30 fps карта сдвигается на доли пикселя за кадр. Обрезка по кругу
+        // не должна «съедать» такое движение, иначе метка замирает.
+        var circle = new MinimapCircle(true, 144, 101, 104, 20);
+        using var first = Texture(240, 240, seed: 21);
+        using var second = ShiftSubpixel(first, 0.3, 0.18);
+
+        var delta = MeasureDelta(first, second, circle, useCircle: true);
+
+        // Оценка возвращается в метрах, поэтому переводим обратно в пиксели.
+        var estimatedPx = -delta.X * 2.2;
+        Assert.InRange(estimatedPx, 0.3 * 0.6, 0.3 * 1.4);
     }
 
     private static (double X, double Z) MeasureDelta(
@@ -194,6 +215,25 @@ public sealed class MinimapVisionTests
             source.Size(),
             InterpolationFlags.Linear,
             BorderTypes.Wrap);
+        return result;
+    }
+
+    private static Mat ShiftSubpixel(Mat source, double dx, double dy)
+    {
+        using var matrix = Mat.FromArray(new double[,]
+        {
+            { 1, 0, dx },
+            { 0, 1, dy }
+        });
+
+        var result = new Mat();
+        Cv2.WarpAffine(
+            source,
+            result,
+            matrix,
+            source.Size(),
+            InterpolationFlags.Cubic,
+            BorderTypes.Reflect);
         return result;
     }
 }

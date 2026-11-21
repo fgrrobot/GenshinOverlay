@@ -6,13 +6,6 @@ namespace TeyvatLens.Core.Vision;
 public static class MinimapNormalizer
 {
     /// <summary>
-    /// Радиус «слепого» пятна вокруг центра миникарты, доля от радиуса круга.
-    /// Закрывает стрелку игрока и основание конуса обзора: они не двигаются
-    /// вместе с картой и без маски тянут оценку сдвига к нулю.
-    /// </summary>
-    public const double ArrowHoleFraction = 0.30;
-
-    /// <summary>
     /// Оставляет только круг миникарты, отрезая интерфейс по углам.
     /// Размер кадра сохраняется: масштабирование перед корреляцией
     /// искажает субпиксельную оценку сдвига.
@@ -37,14 +30,19 @@ public static class MinimapNormalizer
 
     /// <summary>
     /// Вырезает квадрат, описанный вокруг найденного круга миникарты, и
-    /// обнуляет всё вне круга и в центральном пятне под стрелку.
+    /// обнуляет всё вне круга. Стрелку игрока здесь не трогаем: чёрное пятно
+    /// в кадре усиливается локальным выравниванием контраста (CLAHE) и даёт
+    /// статичное светлое кольцо, которое тянет корреляцию к нулю. Стрелку
+    /// закрывает маска трекера, которая накладывается уже после CLAHE.
     ///
-    /// Квадрат центрируется по кругу, поэтому дальнейшие доли (слепое пятно,
+    /// Квадрат центрируется по кругу, поэтому дальнейшие доли (пятно стрелки,
     /// рамка компаса, рабочая зона) снова отсчитываются от центра кадра.
     /// Пиксели не масштабируются: сдвиг в нормализованном кадре равен сдвигу
     /// на экране, и px/м, посчитанный по диаметру круга, остаётся верным.
     ///
-    /// Если круг выходит за кадр, недостающая часть остаётся чёрной.
+    /// Если круг выходит за кадр, берётся только целиком видимая его часть.
+    /// Дополнять кадр чёрным нельзя: чёрная полоса стоит на месте, попадает
+    /// внутрь маски и тянет оценку сдвига к нулю — метка замирает.
     /// Возвращённый Mat нужно освободить.
     /// </summary>
     public static Mat Normalize(Mat image, MinimapCircle circle)
@@ -61,31 +59,30 @@ public static class MinimapNormalizer
 
         using var gray = ToGray(image);
 
-        var radius = circle.RadiusPx;
-        var side = (int)Math.Ceiling(radius * 2.0) + 2;
-        if (side % 2 != 0)
+        var centerX = (int)Math.Round(circle.CenterX);
+        var centerY = (int)Math.Round(circle.CenterY);
+
+        // Радиус, при котором круг целиком помещается в кадр.
+        var visible = Math.Min(
+            circle.RadiusPx,
+            Math.Min(
+                Math.Min(centerX, centerY),
+                Math.Min(image.Width - centerX - 1, image.Height - centerY - 1)));
+
+        var half = (int)Math.Floor(visible);
+        if (half < 8)
         {
-            side++;
+            return Normalize(image);
         }
 
-        var half = side / 2;
-        var left = (int)Math.Round(circle.CenterX) - half;
-        var top = (int)Math.Round(circle.CenterY) - half;
+        var side = half * 2;
+        var left = centerX - half;
+        var top = centerY - half;
 
         var result = new Mat(side, side, MatType.CV_8UC1, Scalar.Black);
-        var sourceX = Math.Max(0, left);
-        var sourceY = Math.Max(0, top);
-        var copyWidth = Math.Min(gray.Width, left + side) - sourceX;
-        var copyHeight = Math.Min(gray.Height, top + side) - sourceY;
-
-        if (copyWidth > 0 && copyHeight > 0)
+        using (var source = new Mat(gray, new Rect(left, top, side, side)))
+        using (var target = new Mat(result, new Rect(0, 0, side, side)))
         {
-            using var source = new Mat(
-                gray,
-                new Rect(sourceX, sourceY, copyWidth, copyHeight));
-            using var target = new Mat(
-                result,
-                new Rect(sourceX - left, sourceY - top, copyWidth, copyHeight));
             source.CopyTo(target);
         }
 
@@ -94,15 +91,8 @@ public static class MinimapNormalizer
         Cv2.Circle(
             mask,
             center,
-            (int)Math.Round(radius),
+            half,
             Scalar.White,
-            -1,
-            LineTypes.AntiAlias);
-        Cv2.Circle(
-            mask,
-            center,
-            (int)Math.Round(radius * ArrowHoleFraction),
-            Scalar.Black,
             -1,
             LineTypes.AntiAlias);
 
